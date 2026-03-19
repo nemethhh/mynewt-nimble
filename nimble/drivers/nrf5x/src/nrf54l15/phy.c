@@ -26,6 +26,9 @@
 #include <controller/ble_fem.h>
 #include "phy_ppi.h"
 
+/* AAR output buffer — resolved IRK index (2 bytes LE) */
+uint8_t g_nrf_aar_out_buf[2];
+
 /* Create PPIB links between RADIO and PERI power domain. */
 #define PPIB_RADIO_PERI(_ch, _src, _dst)                  \
     NRF_PPIB11->SUBSCRIBE_SEND[_ch] = DPPI_CH_SUB(_src);  \
