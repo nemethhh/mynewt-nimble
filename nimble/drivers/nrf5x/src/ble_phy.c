@@ -973,7 +973,9 @@ ble_phy_rx_xcvr_setup(void)
                             (uint8_t *)&g_nrf_encrypt_scratchpad[0],
                             &g_nrf_ccm_data);
         phy_hw_ccm_start();
+#if !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
         phy_ppi_radio_address_to_ccm_crypt_enable();
+#endif
     } else {
         NRF_RADIO->PACKETPTR = (uint32_t)dptr;
     }
@@ -1240,6 +1242,12 @@ ble_phy_rx_end_isr(void)
         ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_CRC_OK;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
         if (g_ble_phy_data.phy_encrypted) {
+#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
+            /* nRF54L15: no on-the-fly decrypt; trigger post-receive
+             * FastDecryption from enc_buf into dptr (rx_buf + 3). */
+            phy_hw_ccm_post_rx_decrypt(
+                (uint8_t *)&g_ble_phy_enc_buf[0], dptr);
+#endif
             while (NRF_CCM_EVENTS_END == 0) {
                 /* Make sure CCM finished */
             };
