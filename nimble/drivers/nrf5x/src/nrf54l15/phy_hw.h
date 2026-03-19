@@ -20,6 +20,7 @@
 #ifndef H_PHY_HW_
 #define H_PHY_HW_
 
+#include <string.h>
 #include <hal/nrf_ccm.h>
 #include <hal/nrf_timer.h>
 
@@ -100,7 +101,110 @@ phy_hw_aar_get_resolved_index(void)
 #define NRF_CCM_STATUS NRF_CCM->MACSTATUS
 #define NRF_CCM_EVENTS_END NRF_CCM->EVENTS_END
 
+#define CCM_ATTR_ALEN   11
+#define CCM_ATTR_MLEN   12
+#define CCM_ATTR_ADATA  13
+#define CCM_ATTR_MDATA  14
+
 uint32_t ble_phy_get_ccm_datarate(void);
+
+/*
+ * CCM scatter/gather job lists and state.
+ * Input: [Alen][Mlen][Adata][Mdata][END] — 5 entries
+ * Output: [Adata][Mdata][END] — 3 entries
+ */
+static struct sg_job_entry g_ccm_in_jl[5];
+static struct sg_job_entry g_ccm_out_jl[3];
+static uint16_t g_ccm_alen;
+static uint16_t g_ccm_mlen;
+static uint8_t *g_ccm_in_ptr;
+static uint8_t *g_ccm_out_ptr;
+static uint8_t g_ccm_decrypt;
+
+/*
+ * nRF54L15 KEY.VALUE byte order is reversed vs nRF52/nRF53.
+ * KEY.VALUE[0] gets the last 4 bytes of the key (word-reversed + byte-swapped).
+ */
+static inline void
+phy_hw_ccm_set_key(const uint8_t *key)
+{
+    const uint32_t *kp = (const uint32_t *)key;
+    NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+    NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+    NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+    NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+}
+
+/*
+ * Build 13-byte BLE CCM nonce from nrf_ccm_data fields,
+ * then write reversed to NONCE.VALUE[0..3].
+ */
+static inline void
+phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
+{
+    uint8_t nonce[16];
+    const uint32_t *np;
+
+    memcpy(&nonce[0], &ccm_data->pkt_counter, 5);
+    nonce[5] = ccm_data->dir_bit;
+    memcpy(&nonce[6], ccm_data->iv, 7);
+    nonce[13] = 0;
+    nonce[14] = 0;
+    nonce[15] = 0;
+
+    np = (const uint32_t *)nonce;
+    NRF_CCM->NONCE.VALUE[0] = __builtin_bswap32(np[3]);
+    NRF_CCM->NONCE.VALUE[1] = __builtin_bswap32(np[2]);
+    NRF_CCM->NONCE.VALUE[2] = __builtin_bswap32(np[1]);
+    NRF_CCM->NONCE.VALUE[3] = __builtin_bswap32(np[0]);
+}
+
+/*
+ * Build CCM scatter/gather job lists for BLE packet format.
+ * BLE RADIO packet in RAM: [S0=hdr][LEN][S1=0][payload...][MIC if encrypted]
+ * CCM Adata = S0 (1 byte), Mdata starts at offset 3 (after S0/LEN/S1).
+ */
+static inline void
+phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
+                               uint16_t payload_len, uint8_t decrypt)
+{
+    uint16_t mdata_in_len;
+    uint16_t mdata_out_len;
+
+    if (decrypt) {
+        mdata_in_len = payload_len + 4;  /* ciphertext + MIC */
+        mdata_out_len = payload_len;     /* plaintext only */
+    } else {
+        mdata_in_len = payload_len;      /* plaintext only */
+        mdata_out_len = payload_len + 4; /* ciphertext + MIC */
+    }
+
+    g_ccm_alen = 1;
+    g_ccm_mlen = payload_len;
+
+    /* Input job list */
+    g_ccm_in_jl[0].ptr = (uint8_t *)&g_ccm_alen;
+    g_ccm_in_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
+    g_ccm_in_jl[1].ptr = (uint8_t *)&g_ccm_mlen;
+    g_ccm_in_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
+    g_ccm_in_jl[2].ptr = in_buf;       /* S0 byte */
+    g_ccm_in_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
+    g_ccm_in_jl[3].ptr = in_buf + 3;   /* payload after S0/LEN/S1 */
+    g_ccm_in_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_in_len;
+    g_ccm_in_jl[4].ptr = NULL;
+    g_ccm_in_jl[4].attr_and_length = 0;
+
+    /* Output job list */
+    g_ccm_out_jl[0].ptr = out_buf;     /* S0 passthrough */
+    g_ccm_out_jl[0].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
+    g_ccm_out_jl[1].ptr = out_buf + 3; /* payload after header slot */
+    g_ccm_out_jl[1].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_out_len;
+    g_ccm_out_jl[2].ptr = NULL;
+    g_ccm_out_jl[2].attr_and_length = 0;
+
+    NRF_CCM->IN.PTR = (uint32_t)g_ccm_in_jl;
+    NRF_CCM->OUT.PTR = (uint32_t)g_ccm_out_jl;
+}
 
 static inline void
 phy_hw_ccm_init(void)
@@ -111,30 +215,67 @@ static inline void
 phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr,
                     uint8_t *scratch_ptr, struct nrf_ccm_data *ccm_data)
 {
-    NRF_CCM->IN.PTR = (uint32_t)in_ptr;
-    NRF_CCM->OUT.PTR = (uint32_t)out_ptr;
+    g_ccm_in_ptr = in_ptr;
+    g_ccm_out_ptr = out_ptr;
+    g_ccm_decrypt = 0;
+
     NRF_CCM->EVENTS_ERROR = 0;
-    NRF_CCM->MODE = CCM_MODE_MACLEN_Pos | ble_phy_get_ccm_datarate();
-    memcpy((uint8_t *) NRF_CCM->KEY.VALUE, &ccm_data->key, sizeof(ccm_data->key));
+    NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->MODE = (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    ble_phy_get_ccm_datarate();
+    phy_hw_ccm_set_key(ccm_data->key);
+    phy_hw_ccm_set_nonce(ccm_data);
 }
 
 static inline void
 phy_hw_ccm_setup_rx(uint8_t *in_ptr, uint8_t *out_ptr,
                     uint8_t *scratch_ptr, struct nrf_ccm_data *ccm_data)
 {
-    NRF_CCM->IN.PTR = (uint32_t)in_ptr;
-    NRF_CCM->OUT.PTR = (uint32_t)out_ptr;
-    NRF_CCM->MODE = CCM_MODE_MACLEN_Pos | CCM_MODE_MODE_Decryption |
-                    ble_phy_get_ccm_datarate();
-    memcpy((uint8_t *) NRF_CCM->KEY.VALUE, &ccm_data->key,
-           sizeof(ccm_data->key));
+    g_ccm_in_ptr = in_ptr;
+    g_ccm_out_ptr = out_ptr;
+    g_ccm_decrypt = 1;
+
     NRF_CCM->EVENTS_ERROR = 0;
     NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                    (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    ble_phy_get_ccm_datarate();
+    phy_hw_ccm_set_key(ccm_data->key);
+    phy_hw_ccm_set_nonce(ccm_data);
 }
 
 static inline void
 phy_hw_ccm_start(void)
 {
+    if (g_ccm_decrypt) {
+        /* RX: don't start yet — triggered post-receive in ISR */
+        return;
+    }
+
+    /* TX: build job lists now (payload is filled) and start encryption */
+    phy_hw_ccm_build_ble_job_lists(g_ccm_in_ptr, g_ccm_out_ptr,
+                                   g_ccm_in_ptr[1], 0);
+    nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+}
+
+/*
+ * Post-receive CCM FastDecryption for nRF54L15.
+ * Called from rx_end_isr after full packet received.
+ * Builds job lists, copies header fields, triggers decrypt.
+ */
+static inline void
+phy_hw_ccm_post_rx_decrypt(uint8_t *enc_buf, uint8_t *out_buf)
+{
+    uint16_t mlen = enc_buf[1];
+
+    /* Copy S0/LEN/S1 from encrypted buffer to output */
+    out_buf[0] = enc_buf[0];
+    out_buf[1] = enc_buf[1];
+    out_buf[2] = enc_buf[2];
+
+    phy_hw_ccm_build_ble_job_lists(enc_buf, out_buf, mlen, 1);
+
+    NRF_CCM->EVENTS_END = 0;
     nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
 }
 
