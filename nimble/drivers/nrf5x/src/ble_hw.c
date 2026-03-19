@@ -307,7 +307,6 @@ ble_hw_encrypt_block(struct ble_encryption_block *ecb)
 }
 #else
 #define NRF_ECB NRF_ECB00
-#define NRF_AAR NRF_AAR00
 
 /* ECB data structure */
 struct ecb_job_entry {

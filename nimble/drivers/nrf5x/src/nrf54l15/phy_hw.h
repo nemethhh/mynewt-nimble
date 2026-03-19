@@ -30,12 +30,32 @@ struct nrf_ccm_data {
     uint8_t iv[8];
 } __attribute__((packed));
 
+/*
+ * Scatter/gather DMA job list entry — shared by AAR, CCM, ECB.
+ * attr_and_length: attr[31:24] | length[23:0]
+ */
+struct sg_job_entry {
+    uint8_t *ptr;
+    uint32_t attr_and_length;
+};
+
+#define AAR_ATTR_HASH   11
+#define AAR_ATTR_PRAND  12
+#define AAR_ATTR_IRK    13
+
+/*
+ * AAR output buffer — resolved IRK index written here (2 bytes LE).
+ * Extern because ble_hw.c reads it via NRF_AAR_STATUS while
+ * ble_phy.c sets up the output job list pointing here.
+ */
+extern uint8_t g_nrf_aar_out_buf[2];
+extern uint8_t g_nrf_num_irks;
+
 #define NRF_TIMER0 NRF_TIMER10
 #define NRF_DPPIC NRF_DPPIC10
 #define NRF_RTC0 NRF_RTC10
 #define NRF_AAR NRF_AAR00
 #define NRF_CCM NRF_CCM00
-#define NRF_AAR NRF_AAR00
 #define NRF_GPIOTE NRF_GPIOTE20
 
 #define RADIO_IRQn RADIO_0_IRQn
@@ -59,9 +79,20 @@ struct nrf_ccm_data {
                                  RADIO_INTENSET00_CRCERROR_Msk)
 
 #define NRF_AAR_NIRK NRF_AAR->MAXRESOLVED
-#define NRF_AAR_IRKPTR NRF_AAR->IN.PTR
-#define NRF_AAR_ADDRPTR NRF_AAR->IN.PTR
-#define NRF_AAR_STATUS NRF_AAR->ERRORSTATUS
+
+/*
+ * nRF54L15 AAR has no STATUS register for the resolved IRK index.
+ * The resolved index is written to the output job list buffer (2 bytes LE).
+ */
+static inline uint32_t
+phy_hw_aar_get_resolved_index(void)
+{
+    if (NRF_AAR->OUT.AMOUNT >= 2) {
+        return (uint32_t)(g_nrf_aar_out_buf[0] | (g_nrf_aar_out_buf[1] << 8));
+    }
+    return 0;
+}
+#define NRF_AAR_STATUS phy_hw_aar_get_resolved_index()
 
 #define CCM_MODE_DATARATE_125Kbps CCM_MODE_DATARATE_125Kbit
 #define CCM_MODE_DATARATE_500Kbps CCM_MODE_DATARATE_500Kbit
@@ -157,16 +188,55 @@ phy_hw_radio_timer_task_stop(void)
     nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
 }
 
+/*
+ * AAR scatter/gather job lists.
+ * Input: [Hash][Prand][IRK0]...[IRKn][END] — max 19 entries (16 IRKs + 2 addr + 1 term)
+ * Output: [resolved index buf][END] — 2 entries
+ */
+static struct sg_job_entry g_aar_in_jl[19];
+static struct sg_job_entry g_aar_out_jl[2];
+
 static inline void
 phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
 {
-    /* TODO */
+    int i;
+    int num_irks = g_nrf_num_irks;
+    struct sg_job_entry *entry;
+
+    /* IRK entries start at index 2 (0=Hash, 1=Prand set in addrptr_set) */
+    entry = &g_aar_in_jl[2];
+    for (i = 0; i < num_irks; i++) {
+        entry->ptr = (uint8_t *)&irk_ptr[i * 4];
+        entry->attr_and_length = (AAR_ATTR_IRK << 24) | 16;
+        entry++;
+    }
+    /* Terminate input job list */
+    entry->ptr = NULL;
+    entry->attr_and_length = 0;
+
+    /* Output: resolved IRK index (2 bytes LE) + terminator */
+    g_aar_out_jl[0].ptr = g_nrf_aar_out_buf;
+    g_aar_out_jl[0].attr_and_length = (11 << 24) | 2;
+    g_aar_out_jl[1].ptr = NULL;
+    g_aar_out_jl[1].attr_and_length = 0;
+
+    NRF_AAR->MAXRESOLVED = num_irks;
+    NRF_AAR->IN.PTR = (uint32_t)g_aar_in_jl;
+    NRF_AAR->OUT.PTR = (uint32_t)g_aar_out_jl;
 }
 
 static inline void
 phy_hw_aar_addrptr_set(uint8_t *dptr)
 {
-    /* TODO */
+    /*
+     * dptr points to start of device address (6 bytes):
+     *   bytes [0..2] = hash (3 bytes, LSB first)
+     *   bytes [3..5] = prand (3 bytes, LSB first)
+     */
+    g_aar_in_jl[0].ptr = dptr;
+    g_aar_in_jl[0].attr_and_length = (AAR_ATTR_HASH << 24) | 3;
+    g_aar_in_jl[1].ptr = dptr + 3;
+    g_aar_in_jl[1].attr_and_length = (AAR_ATTR_PRAND << 24) | 3;
 }
 
 #endif /* H_PHY_HW_ */
