@@ -27,8 +27,10 @@
 
 #include "syscfg/syscfg.h"
 
-#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
-#include "nrf54l15/phy_hw.h"
+#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) || \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) || \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
+#include "nrf54l/phy_hw.h"
 #elif MYNEWT_VAL_CHOICE(MCU_TARGET, nRF5340_NET)
 #include "nrf53/phy_hw.h"
 #else
