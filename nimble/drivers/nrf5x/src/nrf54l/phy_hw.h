@@ -48,7 +48,7 @@ struct sg_job_entry {
 
 /*
  * AAR output status — resolved IRK index written here by the output job list.
- * The nRF54L15 AAR EasyDMA writes exactly 2 bytes per resolved IRK; if the
+ * The nRF54L AAR EasyDMA writes exactly 2 bytes per resolved IRK; if the
  * job-list entry length exceeds 2 the write is silently dropped.
  */
 extern uint16_t g_nrf_aar_out_status;
@@ -73,7 +73,7 @@ extern uint8_t g_nrf_num_irks;
 #elif MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 4
 #define NRF_CPUTIME_TIMER NRF_TIMER24
 #else
-#error Unsupported OS_CPUTIME_TIMER_NUM for nRF54L15 PHY
+#error Unsupported OS_CPUTIME_TIMER_NUM for nRF54L PHY
 #endif
 
 #define RADIO_IRQn RADIO_0_IRQn
@@ -99,7 +99,7 @@ extern uint8_t g_nrf_num_irks;
 #define NRF_AAR_NIRK NRF_AAR->MAXRESOLVED
 
 /*
- * nRF54L15 AAR has no STATUS register for the resolved IRK index.
+ * nRF54L AAR has no STATUS register for the resolved IRK index.
  * The resolved index is written to the output job list buffer (2 bytes LE).
  */
 static inline uint32_t
@@ -129,7 +129,7 @@ uint32_t ble_phy_get_ccm_datarate(void);
  * CCM scatter/gather job lists and state.
  * Input: [Alen][Mlen][Adata][Mdata][END] — 5 entries
  * Output: [Adata][Mdata][END] — 3 entries
- * Defined in nrf54l15/phy.c.
+ * Defined in nrf54l/phy.c.
  */
 extern struct sg_job_entry g_ccm_in_jl[5];
 extern struct sg_job_entry g_ccm_out_jl[3];
@@ -140,7 +140,7 @@ extern uint8_t *g_ccm_out_ptr;
 extern uint8_t g_ccm_decrypt;
 
 /*
- * nRF54L15 KEY.VALUE byte order is reversed vs nRF52/nRF53.
+ * nRF54L KEY.VALUE byte order is reversed vs nRF52/nRF53.
  * KEY.VALUE[0] gets the last 4 bytes of the key (word-reversed + byte-swapped).
  */
 static inline void
@@ -315,7 +315,7 @@ phy_hw_ccm_start(void)
 }
 
 /*
- * Post-receive CCM FastDecryption for nRF54L15.
+ * Post-receive CCM FastDecryption for nRF54L.
  * Called from rx_end_isr after full packet received.
  * Builds job lists, copies header fields, triggers decrypt.
  */
@@ -361,7 +361,7 @@ phy_hw_radio_shorts_setup_tx(void)
 static inline void
 phy_hw_radio_shorts_setup_rx(void)
 {
-    /* nRF54L15 RADIO has no DISABLED_RSSISTOP shortcut */
+    /* nRF54L RADIO has no DISABLED_RSSISTOP shortcut */
     NRF_RADIO->SHORTS = RADIO_SHORTS_PHYEND_DISABLE_Msk |
                         RADIO_SHORTS_READY_START_Msk |
                         RADIO_SHORTS_ADDRESS_BCSTART_Msk |
@@ -377,7 +377,7 @@ phy_hw_radio_datawhite_set(uint8_t chan)
 static inline void
 phy_hw_timer_configure(void)
 {
-    /* nRF54L15 TIMER10 runs at 32MHz; prescaler 5 → 32MHz/32 = 1MHz */
+    /* nRF54L TIMER10 runs at 32MHz; prescaler 5 → 32MHz/32 = 1MHz */
     NRF_TIMER0->PRESCALER = 5;
 }
 
@@ -391,7 +391,7 @@ phy_hw_radio_timer_task_stop(void)
  * AAR scatter/gather job lists.
  * Input: [Hash][Prand][IRK0]...[IRKn][END] — max 19 entries (16 IRKs + 2 addr + 1 term)
  * Output: [resolved index buf][END] — 2 entries
- * Defined in nrf54l15/phy.c.
+ * Defined in nrf54l/phy.c.
  */
 extern struct sg_job_entry g_aar_in_jl[19];
 extern struct sg_job_entry g_aar_out_jl[2];
