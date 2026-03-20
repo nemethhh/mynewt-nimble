@@ -340,7 +340,7 @@ ble_hw_encrypt_block(struct ble_encryption_block *ecb)
     NRF_ECB->EVENTS_ERROR = 0;
     NRF_ECB->IN.PTR = (uint32_t)ecb_input_job_list;
     NRF_ECB->OUT.PTR = (uint32_t)ecb_output_job_list;
-    /* nRF54L15 KEY.VALUE uses reversed byte order (same as CCM) */
+    /* nRF54L KEY.VALUE uses reversed byte order (same as CCM) */
     {
         const uint32_t *kp = (const uint32_t *)ecb->key;
         NRF_ECB->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
