@@ -18,7 +18,7 @@
 #
 
 pkg.name: nimble/drivers/nrf5x
-pkg.description: PHY for nRF52 and nRF53 series
+pkg.description: PHY for nRF52, nRF53 and nRF54L15 series
 pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
 pkg.homepage: "https://mynewt.apache.org/"
 pkg.keywords:
