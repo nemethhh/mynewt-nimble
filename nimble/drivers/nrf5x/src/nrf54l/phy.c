@@ -26,7 +26,7 @@
 #include <controller/ble_fem.h>
 #include "phy_ppi.h"
 
-/* AAR output status — resolved IRK index written by the nRF54L15 AAR output
+/* AAR output status — resolved IRK index written by the nRF54L AAR output
  * job list.  The hardware writes exactly 2 bytes per resolved IRK; if the
  * job-list entry length exceeds that the EasyDMA silently drops the write. */
 uint16_t g_nrf_aar_out_status;
