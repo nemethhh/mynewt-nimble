@@ -28,11 +28,13 @@
 #define DPPI_CH_MASK(_ch)       (1 << (DPPI_CH_ ## _ch))
 
 /* DPPIC00 [0:7] */
+#define DPPI_CH_CCM00_SUBSCRIBE_START          0
+#define DPPI_CH_AAR00_SUBSCRIBE_START          1
 
 /* DPPIC10 [0:23] */
 #define DPPI_CH_TIMER0_EVENTS_COMPARE_0         0
 #define DPPI_CH_TIMER0_EVENTS_COMPARE_3         1
-#define DPPI_CH_RADIO_EVENTS_END                2
+#define DPPI_CH_RADIO_EVENTS_PHYEND              2
 #define DPPI_CH_RADIO_EVENTS_BCMATCH            3
 #define DPPI_CH_RADIO_EVENTS_ADDRESS            4
 #define DPPI_CH_RTC0_EVENTS_COMPARE_0           5
@@ -97,25 +99,25 @@ phy_ppi_timer0_compare0_to_radio_rxen_disable(void)
 static inline void
 phy_ppi_radio_address_to_ccm_crypt_enable(void)
 {
-    NRF_CCM->SUBSCRIBE_START = DPPI_CH_SUB(RADIO_EVENTS_ADDRESS);
+    NRF_CCM->SUBSCRIBE_START = DPPI_CH_SUB(CCM00_SUBSCRIBE_START);
 }
 
 static inline void
 phy_ppi_radio_address_to_ccm_crypt_disable(void)
 {
-    NRF_CCM->SUBSCRIBE_START = DPPI_CH_UNSUB(RADIO_EVENTS_ADDRESS);
+    NRF_CCM->SUBSCRIBE_START = DPPI_CH_UNSUB(CCM00_SUBSCRIBE_START);
 }
 
 static inline void
 phy_ppi_radio_bcmatch_to_aar_start_enable(void)
 {
-    NRF_AAR->SUBSCRIBE_START = DPPI_CH_SUB(RADIO_EVENTS_BCMATCH);
+    NRF_AAR->SUBSCRIBE_START = DPPI_CH_SUB(AAR00_SUBSCRIBE_START);
 }
 
 static inline void
 phy_ppi_radio_bcmatch_to_aar_start_disable(void)
 {
-    NRF_AAR->SUBSCRIBE_START = DPPI_CH_UNSUB(RADIO_EVENTS_BCMATCH);
+    NRF_AAR->SUBSCRIBE_START = DPPI_CH_UNSUB(AAR00_SUBSCRIBE_START);
 }
 
 static inline void
@@ -158,8 +160,8 @@ phy_ppi_disable(void)
     NRF_RADIO->SUBSCRIBE_DISABLE = DPPI_CH_UNSUB(TIMER0_EVENTS_COMPARE_3);
     NRF_RADIO->SUBSCRIBE_TXEN = DPPI_CH_UNSUB(TIMER0_EVENTS_COMPARE_0);
     NRF_RADIO->SUBSCRIBE_RXEN = DPPI_CH_UNSUB(TIMER0_EVENTS_COMPARE_0);
-    NRF_AAR->SUBSCRIBE_START = DPPI_CH_UNSUB(RADIO_EVENTS_BCMATCH);
-    NRF_CCM->SUBSCRIBE_START = DPPI_CH_UNSUB(RADIO_EVENTS_ADDRESS);
+    NRF_AAR->SUBSCRIBE_START = DPPI_CH_UNSUB(AAR00_SUBSCRIBE_START);
+    NRF_CCM->SUBSCRIBE_START = DPPI_CH_UNSUB(CCM00_SUBSCRIBE_START);
 
     phy_ppi_fem_disable();
 }

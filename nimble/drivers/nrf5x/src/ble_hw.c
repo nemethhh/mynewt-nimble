@@ -306,8 +306,6 @@ ble_hw_encrypt_block(struct ble_encryption_block *ecb)
     return rc;
 }
 #else
-#define NRF_ECB NRF_ECB00
-
 /* ECB data structure */
 struct ecb_job_entry {
     uint8_t *ptr;

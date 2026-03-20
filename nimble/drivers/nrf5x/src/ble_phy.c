@@ -642,10 +642,6 @@ ble_phy_tifs_set(uint16_t tifs)
 static int
 ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
 {
-    uint32_t next_cc;
-    uint32_t cur_cc;
-    uint32_t cntr;
-    uint32_t delta;
     int radio_rem_us;
 #if PHY_USE_FEM
     int fem_rem_us = 0;
@@ -701,26 +697,7 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
         rem_us_corr = 30;
     }
 
-    /*
-     * Can we set the RTC compare to start TIMER0? We can do it if:
-     *      a) Current compare value is not N+1 or N+2 ticks from current
-     *      counter.
-     *      b) The value we want to set is not at least N+2 from current
-     *      counter.
-     *
-     * NOTE: since the counter can tick 1 while we do these calculations we
-     * need to account for it.
-     */
-    next_cc = cputime & 0xffffff;
-    cur_cc = NRF_RTC0->CC[0];
-    cntr = NRF_RTC0->COUNTER;
-
-    delta = (cur_cc - cntr) & 0xffffff;
-    if ((delta <= 3) && (delta != 0)) {
-        return -1;
-    }
-    delta = (next_cc - cntr) & 0xffffff;
-    if ((delta & 0x800000) || (delta < 3)) {
+    if (phy_hw_timer_start_trigger_configure(cputime) != 0) {
         return -1;
     }
 
@@ -737,12 +714,7 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
     }
 #endif
 
-    /* Set RTC compare to start TIMER0 */
-    NRF_RTC0->EVENTS_COMPARE[0] = 0;
-    nrf_rtc_cc_set(NRF_RTC0, 0, next_cc);
-    nrf_rtc_event_enable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
-
-    /* Enable PPI */
+    /* Enable the start trigger feeding TIMER0/TIMER10. */
 #if PHY_USE_FEM
     if (fem_rem_us) {
         if (tx) {
@@ -758,7 +730,7 @@ ble_phy_set_start_time(uint32_t cputime, uint8_t rem_us, bool tx)
 #endif
     phy_ppi_rtc0_compare0_to_timer0_start_enable();
 
-    /* Store the cputime at which we set the RTC */
+    /* Store the cputime at which we armed the start trigger. */
     g_ble_phy_data.phy_start_cputime = cputime;
 
     return 0;
@@ -806,15 +778,12 @@ ble_phy_set_start_now(void)
 #endif
 
     /*
-     * Set RTC compare to start TIMER0. We need to set it to at least N+2 ticks
-     * from current value to guarantee triggering compare event, but let's set
-     * it to N+3 to account for possible extra tick on RTC0 during these
-     * operations.
+     * Arm the start trigger at N+3 ticks so the compare event fires after all
+     * registers and subscriptions are in place.
      */
     now = os_cputime_get32();
-    NRF_RTC0->EVENTS_COMPARE[0] = 0;
-    nrf_rtc_cc_set(NRF_RTC0, 0, (now + 3) & 0xffffff);
-    nrf_rtc_event_enable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
+    now += 3;
+    phy_hw_timer_start_trigger_set(now);
 
 #if PHY_USE_FEM_LNA
     phy_fem_enable_lna();
@@ -824,7 +793,7 @@ ble_phy_set_start_now(void)
     phy_ppi_rtc0_compare0_to_timer0_start_enable();
 
     /*
-     * Store the cputime at which we set the RTC
+     * Store the cputime at which we armed the start trigger.
      *
      * XXX Compare event may be triggered on previous CC value (if it was set to
      * less than N+2) so in rare cases actual start time may be 2 ticks earlier
@@ -832,7 +801,7 @@ ble_phy_set_start_now(void)
      * to be scheduled 1 or 2 ticks too late so we'll miss it - it's acceptable
      * for now.
      */
-    g_ble_phy_data.phy_start_cputime = now + 3;
+    g_ble_phy_data.phy_start_cputime = now;
 
     OS_EXIT_CRITICAL(sr);
 
@@ -969,7 +938,7 @@ ble_phy_rx_xcvr_setup(void)
     if (g_ble_phy_data.phy_encrypted) {
         NRF_RADIO->PACKETPTR = (uint32_t)&g_ble_phy_enc_buf[0];
         phy_hw_ccm_setup_rx((uint8_t *)&g_ble_phy_enc_buf[0],
-                            (uint8_t *)&g_ble_phy_enc_buf[3],
+                            dptr,
                             (uint8_t *)&g_nrf_encrypt_scratchpad[0],
                             &g_nrf_ccm_data);
         phy_hw_ccm_start();
@@ -1439,13 +1408,13 @@ ble_phy_rx_start_isr(void)
      * If privacy is enabled and received PDU has TxAdd bit set (i.e. random
      * address) we try to resolve address using AAR.
      */
-    if (g_ble_phy_data.phy_privacy && (dptr[3] & 0x40)) {
+    if (g_ble_phy_data.phy_privacy && (dptr[0] & 0x40)) {
         /*
          * AdvA is located at 4th octet in RX buffer (after S0, length an S1
          * fields). In case of extended advertising PDU we need to add 2 more
          * octets for extended header.
          */
-        adva_offset = (dptr[3] & 0x0f) == 0x07 ? 2 : 0;
+        adva_offset = (dptr[0] & 0x0f) == 0x07 ? 2 : 0;
         phy_hw_aar_addrptr_set(dptr + 3 + adva_offset);
 
         /* Trigger AAR after last bit of AdvA is received */
@@ -2155,13 +2124,13 @@ ble_phy_chan_get(void)
 }
 
 /**
- * Stop the timer used to count microseconds when using RTC for cputime
+ * Stop the start-trigger source feeding the PHY timer.
  */
 static void
 ble_phy_stop_usec_timer(void)
 {
     phy_hw_radio_timer_task_stop();
-    nrf_rtc_event_disable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
+    phy_hw_timer_start_trigger_disable();
 }
 
 /**

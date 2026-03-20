@@ -23,6 +23,7 @@
 #include <nrf_gpio.h>
 #include <nrf_gpiote.h>
 #include <hal/nrf_ccm.h>
+#include <hal/nrf_rtc.h>
 #include <hal/nrf_timer.h>
 
 struct nrf_ccm_data {
@@ -159,6 +160,47 @@ phy_gpiote_configure(int idx, int pin)
     nrf_gpiote_task_configure(NRF_GPIOTE, idx, pin, NRF_GPIOTE_POLARITY_NONE,
                               NRF_GPIOTE_INITIAL_VALUE_LOW);
     nrf_gpiote_task_enable(NRF_GPIOTE, idx);
+}
+
+static inline void
+phy_hw_timer_start_trigger_set(uint32_t cputime)
+{
+    NRF_RTC0->EVENTS_COMPARE[0] = 0;
+    nrf_rtc_cc_set(NRF_RTC0, 0, cputime & 0xffffff);
+    nrf_rtc_event_enable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
+}
+
+static inline int
+phy_hw_timer_start_trigger_configure(uint32_t cputime)
+{
+    uint32_t next_cc;
+    uint32_t cur_cc;
+    uint32_t cntr;
+    uint32_t delta;
+
+    next_cc = cputime & 0xffffff;
+    cur_cc = NRF_RTC0->CC[0];
+    cntr = NRF_RTC0->COUNTER;
+
+    delta = (cur_cc - cntr) & 0xffffff;
+    if ((delta <= 3) && (delta != 0)) {
+        return -1;
+    }
+
+    delta = (next_cc - cntr) & 0xffffff;
+    if ((delta & 0x800000) || (delta < 3)) {
+        return -1;
+    }
+
+    phy_hw_timer_start_trigger_set(cputime);
+
+    return 0;
+}
+
+static inline void
+phy_hw_timer_start_trigger_disable(void)
+{
+    nrf_rtc_event_disable(NRF_RTC0, RTC_EVTENSET_COMPARE0_Msk);
 }
 
 #endif /* H_PHY_HW_ */

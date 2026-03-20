@@ -21,6 +21,8 @@
 #define H_PHY_HW_
 
 #include <string.h>
+#include "syscfg/syscfg.h"
+#include "os/os_cputime.h"
 #include <hal/nrf_ccm.h>
 #include <hal/nrf_timer.h>
 
@@ -45,11 +47,11 @@ struct sg_job_entry {
 #define AAR_ATTR_IRK    13
 
 /*
- * AAR output buffer — resolved IRK index written here (2 bytes LE).
- * Extern because ble_hw.c reads it via NRF_AAR_STATUS while
- * ble_phy.c sets up the output job list pointing here.
+ * AAR output status — resolved IRK index written here by the output job list.
+ * The nRF54L15 AAR EasyDMA writes exactly 2 bytes per resolved IRK; if the
+ * job-list entry length exceeds 2 the write is silently dropped.
  */
-extern uint8_t g_nrf_aar_out_buf[2];
+extern uint16_t g_nrf_aar_out_status;
 extern uint8_t g_nrf_num_irks;
 
 #define NRF_TIMER0 NRF_TIMER10
@@ -57,7 +59,22 @@ extern uint8_t g_nrf_num_irks;
 #define NRF_RTC0 NRF_RTC10
 #define NRF_AAR NRF_AAR00
 #define NRF_CCM NRF_CCM00
+#define NRF_ECB NRF_ECB00
 #define NRF_GPIOTE NRF_GPIOTE20
+
+#if MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 0
+#define NRF_CPUTIME_TIMER NRF_TIMER20
+#elif MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 1
+#define NRF_CPUTIME_TIMER NRF_TIMER21
+#elif MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 2
+#define NRF_CPUTIME_TIMER NRF_TIMER22
+#elif MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 3
+#define NRF_CPUTIME_TIMER NRF_TIMER23
+#elif MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 4
+#define NRF_CPUTIME_TIMER NRF_TIMER24
+#else
+#error Unsupported OS_CPUTIME_TIMER_NUM for nRF54L15 PHY
+#endif
 
 #define RADIO_IRQn RADIO_0_IRQn
 #define RADIO_INTENSET_ADDRESS_Msk RADIO_INTENSET00_ADDRESS_Msk
@@ -88,8 +105,8 @@ extern uint8_t g_nrf_num_irks;
 static inline uint32_t
 phy_hw_aar_get_resolved_index(void)
 {
-    if (NRF_AAR->OUT.AMOUNT >= 2) {
-        return (uint32_t)(g_nrf_aar_out_buf[0] | (g_nrf_aar_out_buf[1] << 8));
+    if (NRF_AAR->OUT.AMOUNT >= sizeof(g_nrf_aar_out_status)) {
+        return g_nrf_aar_out_status;
     }
     return 0;
 }
@@ -112,14 +129,15 @@ uint32_t ble_phy_get_ccm_datarate(void);
  * CCM scatter/gather job lists and state.
  * Input: [Alen][Mlen][Adata][Mdata][END] — 5 entries
  * Output: [Adata][Mdata][END] — 3 entries
+ * Defined in nrf54l15/phy.c.
  */
-static struct sg_job_entry g_ccm_in_jl[5];
-static struct sg_job_entry g_ccm_out_jl[3];
-static uint16_t g_ccm_alen;
-static uint16_t g_ccm_mlen;
-static uint8_t *g_ccm_in_ptr;
-static uint8_t *g_ccm_out_ptr;
-static uint8_t g_ccm_decrypt;
+extern struct sg_job_entry g_ccm_in_jl[5];
+extern struct sg_job_entry g_ccm_out_jl[3];
+extern uint16_t g_ccm_alen;
+extern uint16_t g_ccm_mlen;
+extern uint8_t *g_ccm_in_ptr;
+extern uint8_t *g_ccm_out_ptr;
+extern uint8_t g_ccm_decrypt;
 
 /*
  * nRF54L15 KEY.VALUE byte order is reversed vs nRF52/nRF53.
@@ -209,6 +227,44 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
 static inline void
 phy_hw_ccm_init(void)
 {
+}
+
+static inline void
+phy_hw_timer_start_trigger_set(uint32_t cputime)
+{
+    NRF_CPUTIME_TIMER->EVENTS_COMPARE[0] = 0;
+    nrf_timer_cc_set(NRF_CPUTIME_TIMER, 0, cputime);
+}
+
+static inline int
+phy_hw_timer_start_trigger_configure(uint32_t cputime)
+{
+    uint32_t cur_cc;
+    uint32_t cntr;
+    uint32_t delta;
+
+    cur_cc = NRF_CPUTIME_TIMER->CC[0];
+    cntr = os_cputime_get32();
+
+    delta = cur_cc - cntr;
+    if ((delta <= 3) && (delta != 0)) {
+        return -1;
+    }
+
+    delta = cputime - cntr;
+    if (((int32_t)delta < 0) || (delta < 3)) {
+        return -1;
+    }
+
+    phy_hw_timer_start_trigger_set(cputime);
+
+    return 0;
+}
+
+static inline void
+phy_hw_timer_start_trigger_disable(void)
+{
+    NRF_CPUTIME_TIMER->EVENTS_COMPARE[0] = 0;
 }
 
 static inline void
@@ -305,6 +361,7 @@ phy_hw_radio_shorts_setup_tx(void)
 static inline void
 phy_hw_radio_shorts_setup_rx(void)
 {
+    /* nRF54L15 RADIO has no DISABLED_RSSISTOP shortcut */
     NRF_RADIO->SHORTS = RADIO_SHORTS_PHYEND_DISABLE_Msk |
                         RADIO_SHORTS_READY_START_Msk |
                         RADIO_SHORTS_ADDRESS_BCSTART_Msk |
@@ -320,6 +377,7 @@ phy_hw_radio_datawhite_set(uint8_t chan)
 static inline void
 phy_hw_timer_configure(void)
 {
+    /* nRF54L15 TIMER10 runs at 32MHz; prescaler 5 → 32MHz/32 = 1MHz */
     NRF_TIMER0->PRESCALER = 5;
 }
 
@@ -333,9 +391,10 @@ phy_hw_radio_timer_task_stop(void)
  * AAR scatter/gather job lists.
  * Input: [Hash][Prand][IRK0]...[IRKn][END] — max 19 entries (16 IRKs + 2 addr + 1 term)
  * Output: [resolved index buf][END] — 2 entries
+ * Defined in nrf54l15/phy.c.
  */
-static struct sg_job_entry g_aar_in_jl[19];
-static struct sg_job_entry g_aar_out_jl[2];
+extern struct sg_job_entry g_aar_in_jl[19];
+extern struct sg_job_entry g_aar_out_jl[2];
 
 static inline void
 phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
@@ -355,9 +414,10 @@ phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
     entry->ptr = NULL;
     entry->attr_and_length = 0;
 
-    /* Output: resolved IRK index (2 bytes LE) + terminator */
-    g_aar_out_jl[0].ptr = g_nrf_aar_out_buf;
-    g_aar_out_jl[0].attr_and_length = (11 << 24) | 2;
+    /* Output: resolved IRK index/status word + terminator */
+    g_nrf_aar_out_status = UINT16_MAX;
+    g_aar_out_jl[0].ptr = (uint8_t *)&g_nrf_aar_out_status;
+    g_aar_out_jl[0].attr_and_length = (11 << 24) | sizeof(g_nrf_aar_out_status);
     g_aar_out_jl[1].ptr = NULL;
     g_aar_out_jl[1].attr_and_length = 0;
 
