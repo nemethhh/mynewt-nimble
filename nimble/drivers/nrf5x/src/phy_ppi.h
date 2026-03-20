@@ -22,6 +22,9 @@
  * Routes to the correct chip-specific phy_ppi.h based on MCU_TARGET.
  */
 
+#ifndef H_PHY_PPI_DISPATCH_
+#define H_PHY_PPI_DISPATCH_
+
 #include "syscfg/syscfg.h"
 
 #if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
@@ -31,3 +34,5 @@
 #else
 #include "nrf52/phy_ppi.h"
 #endif
+
+#endif /* H_PHY_PPI_DISPATCH_ */

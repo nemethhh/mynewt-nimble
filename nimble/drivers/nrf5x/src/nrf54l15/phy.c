@@ -26,8 +26,23 @@
 #include <controller/ble_fem.h>
 #include "phy_ppi.h"
 
-/* AAR output buffer — resolved IRK index (2 bytes LE) */
-uint8_t g_nrf_aar_out_buf[2];
+/* AAR output status — resolved IRK index written by the nRF54L15 AAR output
+ * job list.  The hardware writes exactly 2 bytes per resolved IRK; if the
+ * job-list entry length exceeds that the EasyDMA silently drops the write. */
+uint16_t g_nrf_aar_out_status;
+
+/* CCM scatter/gather job lists and state */
+struct sg_job_entry g_ccm_in_jl[5];
+struct sg_job_entry g_ccm_out_jl[3];
+uint16_t g_ccm_alen;
+uint16_t g_ccm_mlen;
+uint8_t *g_ccm_in_ptr;
+uint8_t *g_ccm_out_ptr;
+uint8_t g_ccm_decrypt;
+
+/* AAR scatter/gather job lists */
+struct sg_job_entry g_aar_in_jl[19];
+struct sg_job_entry g_aar_out_jl[2];
 
 /* Create PPIB links between RADIO and PERI power domain. */
 #define PPIB_RADIO_PERI(_ch, _src, _dst)                  \
@@ -43,6 +58,13 @@ uint8_t g_nrf_aar_out_buf[2];
     NRF_DPPIC10->CHENSET |= 1 << DPPI_CH_ ## _src;        \
     NRF_DPPIC00->CHENSET |= 1 << DPPI_CH_ ## _dst;
 
+/* Create PPIB links between PERI and RADIO power domain. */
+#define PPIB_PERI_RADIO(_ch, _src, _dst)                  \
+    NRF_PPIB21->SUBSCRIBE_SEND[_ch] = DPPI_CH_SUB(_src);  \
+    NRF_PPIB11->PUBLISH_RECEIVE[_ch] = DPPI_CH_PUB(_dst); \
+    NRF_DPPIC20->CHENSET |= 1 << DPPI_CH_ ## _src;        \
+    NRF_DPPIC10->CHENSET |= 1 << DPPI_CH_ ## _dst;
+
 
 #define PPIB_RADIO_PERI_0(_src, _dst) PPIB_RADIO_PERI(0, _src, _dst)
 #define PPIB_RADIO_PERI_1(_src, _dst) PPIB_RADIO_PERI(1, _src, _dst)
@@ -51,6 +73,7 @@ uint8_t g_nrf_aar_out_buf[2];
 
 #define PPIB_RADIO_MCU_0(_src, _dst) PPIB_RADIO_MCU(0, _src, _dst)
 #define PPIB_RADIO_MCU_1(_src, _dst) PPIB_RADIO_MCU(1, _src, _dst)
+#define PPIB_PERI_RADIO_4(_src, _dst) PPIB_PERI_RADIO(4, _src, _dst)
 
 #if PHY_USE_DEBUG
 void
@@ -83,7 +106,7 @@ phy_debug_init(void)
     PPIB_RADIO_PERI_2(RADIO_EVENTS_ADDRESS, GPIOTE20_TASKS_SET_1);
     NRF_GPIOTE20->SUBSCRIBE_SET[PHY_GPIOTE_DEBUG_2] = DPPI_CH_SUB(GPIOTE20_TASKS_SET_1);
 
-    PPIB_RADIO_PERI_3(RADIO_EVENTS_END, GPIOTE20_TASKS_CLR_1);
+    PPIB_RADIO_PERI_3(RADIO_EVENTS_PHYEND, GPIOTE20_TASKS_CLR_1);
     NRF_GPIOTE20->SUBSCRIBE_CLR[PHY_GPIOTE_DEBUG_2] = DPPI_CH_SUB(GPIOTE20_TASKS_CLR_1);
 #endif
 }
@@ -93,21 +116,27 @@ void
 phy_ppi_init(void)
 {
     /* Publish events */
-    NRF_TIMER00->PUBLISH_COMPARE[0] = DPPI_CH_PUB(TIMER0_EVENTS_COMPARE_0);
-    NRF_TIMER00->PUBLISH_COMPARE[3] = DPPI_CH_PUB(TIMER0_EVENTS_COMPARE_3);
-    NRF_RADIO->PUBLISH_PHYEND = DPPI_CH_PUB(RADIO_EVENTS_END);
+    NRF_TIMER0->PUBLISH_COMPARE[0] = DPPI_CH_PUB(TIMER0_EVENTS_COMPARE_0);
+    NRF_TIMER0->PUBLISH_COMPARE[3] = DPPI_CH_PUB(TIMER0_EVENTS_COMPARE_3);
+    NRF_RADIO->PUBLISH_PHYEND = DPPI_CH_PUB(RADIO_EVENTS_PHYEND);
 
     NRF_RADIO->PUBLISH_BCMATCH = DPPI_CH_PUB(RADIO_EVENTS_BCMATCH);
     NRF_RADIO->PUBLISH_ADDRESS = DPPI_CH_PUB(RADIO_EVENTS_ADDRESS);
-    NRF_RTC0->PUBLISH_COMPARE[0] = DPPI_CH_PUB(RTC0_EVENTS_COMPARE_0);
+    NRF_CPUTIME_TIMER->PUBLISH_COMPARE[0] = DPPI_CH_PUB(RTC0_EVENTS_COMPARE_0);
+
+    /* Cross-domain RADIO -> MCU routes for CCM00 and AAR00. */
+    PPIB_RADIO_MCU_0(RADIO_EVENTS_ADDRESS, CCM00_SUBSCRIBE_START);
+    PPIB_RADIO_MCU_1(RADIO_EVENTS_BCMATCH, AAR00_SUBSCRIBE_START);
+    /* Cross-domain PERI -> RADIO route for scheduled start trigger. */
+    PPIB_PERI_RADIO_4(RTC0_EVENTS_COMPARE_0, RTC0_EVENTS_COMPARE_0);
 
     /* Enable channels we publish on */
     NRF_DPPIC->CHENSET = DPPI_CH_ENABLE_ALL;
 
     /* radio_address_to_timer0_capture1 */
-    NRF_TIMER00->SUBSCRIBE_CAPTURE[1] = DPPI_CH_SUB(RADIO_EVENTS_ADDRESS);
+    NRF_TIMER0->SUBSCRIBE_CAPTURE[1] = DPPI_CH_SUB(RADIO_EVENTS_ADDRESS);
     /* radio_end_to_timer0_capture2 */
-    NRF_TIMER00->SUBSCRIBE_CAPTURE[2] = DPPI_CH_SUB(RADIO_EVENTS_END);
+    NRF_TIMER0->SUBSCRIBE_CAPTURE[2] = DPPI_CH_SUB(RADIO_EVENTS_PHYEND);
 }
 
 void
