@@ -66,8 +66,10 @@
 #if !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52840) && \
     !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF52811) && \
     !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF5340_NET) && \
-    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
-#error LE Coded PHY can only be enabled on nRF52811, nRF52840, nRF5340 or nRF54L15
+    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) && \
+    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) && \
+    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
+#error LE Coded PHY can only be enabled on nRF52811, nRF52840, nRF5340 or nRF54L series
 #endif
 #endif
 
@@ -942,7 +944,9 @@ ble_phy_rx_xcvr_setup(void)
                             (uint8_t *)&g_nrf_encrypt_scratchpad[0],
                             &g_nrf_ccm_data);
         phy_hw_ccm_start();
-#if !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
+#if !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) && \
+    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) && \
+    !MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
         phy_ppi_radio_address_to_ccm_crypt_enable();
 #endif
     } else {
@@ -1211,8 +1215,10 @@ ble_phy_rx_end_isr(void)
         ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_CRC_OK;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
         if (g_ble_phy_data.phy_encrypted) {
-#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15)
-            /* nRF54L15: no on-the-fly decrypt; trigger post-receive
+#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) || \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) || \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
+            /* nRF54L: no on-the-fly decrypt; trigger post-receive
              * FastDecryption from enc_buf into dptr (rx_buf + 3). */
             phy_hw_ccm_post_rx_decrypt(
                 (uint8_t *)&g_ble_phy_enc_buf[0], dptr);
