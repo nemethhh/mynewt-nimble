@@ -74,9 +74,13 @@ hci_h4_frame_start(struct hci_h4_sm *rxs, uint8_t pkt_type)
         rxs->min_len = 2;
         break;
     default:
-        /* XXX sync loss */
-        assert(0);
-        break;
+        /*
+         * Invalid packet type — likely stale UART data after a host
+         * detach/re-attach cycle.  Signal the caller to skip this byte
+         * and try again instead of crashing.
+         */
+        rxs->min_len = 0;
+        return;
     }
 }
 
@@ -285,6 +289,10 @@ hci_h4_sm_rx(struct hci_h4_sm *h4sm, const uint8_t *buf, uint16_t len)
         case HCI_H4_SM_W4_PKT_TYPE:
             hci_h4_frame_start(h4sm, ib.buf[0]);
             hci_h4_ib_consume(&ib, 1);
+            if (h4sm->min_len == 0) {
+                /* Invalid packet type — skip byte and resync */
+                break;
+            }
             h4sm->state = HCI_H4_SM_W4_HEADER;
         /* no break */
         case HCI_H4_SM_W4_HEADER:

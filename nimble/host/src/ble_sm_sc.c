@@ -30,6 +30,16 @@
 #define BLE_SM_SC_PASSKEY_BYTES     4
 #define BLE_SM_SC_PASSKEY_BITS      20
 
+volatile uint32_t g_sm_sc_dbg_pk_tx = 0;
+volatile uint32_t g_sm_sc_dbg_pk_rx = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_gen_ok = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_gen_fail = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_tx = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_rx = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_check_ok = 0;
+volatile uint32_t g_sm_sc_dbg_dhkey_check_fail = 0;
+volatile uint8_t  g_sm_sc_dbg_last_pair_alg = 0;
+
 static uint8_t ble_sm_sc_pub_key[64];
 static uint8_t ble_sm_sc_priv_key[32];
 
@@ -564,6 +574,8 @@ ble_sm_sc_public_key_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         res->sm_err = BLE_SM_ERR_UNSPECIFIED;
         return;
     }
+    g_sm_sc_dbg_pk_tx++;
+    g_sm_sc_dbg_last_pair_alg = proc->pair_alg;
 
     if (!(proc->flags & BLE_SM_PROC_F_INITIATOR)) {
         if (proc->pair_alg == BLE_SM_PAIR_ALG_OOB) {
@@ -612,6 +624,7 @@ ble_sm_sc_public_key_rx(uint16_t conn_handle, struct os_mbuf **om,
     }
 
     cmd = (struct ble_sm_public_key *)(*om)->om_data;
+    g_sm_sc_dbg_pk_rx++;
     /* Check if the peer public key is same as our generated public key.
      * Return fail if the public keys match. */
     if (memcmp(cmd, ble_sm_sc_pub_key, 64) == 0) {
@@ -633,10 +646,13 @@ ble_sm_sc_public_key_rx(uint16_t conn_handle, struct os_mbuf **om,
                                   ble_sm_sc_priv_key,
                                   proc->dhkey);
         if (rc != 0) {
+            g_sm_sc_dbg_dhkey_gen_fail++;
             res->app_status = BLE_HS_SM_US_ERR(BLE_SM_ERR_DHKEY);
             res->sm_err = BLE_SM_ERR_DHKEY;
             res->enc_cb = 1;
         } else {
+            g_sm_sc_dbg_dhkey_gen_ok++;
+            g_sm_sc_dbg_last_pair_alg = proc->pair_alg;
             if (proc->flags & BLE_SM_PROC_F_INITIATOR) {
                 if (proc->pair_alg == BLE_SM_PAIR_ALG_OOB) {
                     proc->state = BLE_SM_PROC_STATE_RANDOM;
@@ -733,6 +749,8 @@ ble_sm_sc_dhkey_check_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
     if (rc != 0) {
         goto err;
     }
+    g_sm_sc_dbg_dhkey_tx++;
+    g_sm_sc_dbg_last_pair_alg = proc->pair_alg;
 
     if (!(proc->flags & BLE_SM_PROC_F_INITIATOR)) {
         proc->state = BLE_SM_PROC_STATE_LTK_START;
@@ -806,11 +824,14 @@ ble_sm_dhkey_check_process(struct ble_sm_proc *proc,
 
     if (memcmp(cmd->value, exp_value, 16) != 0) {
         /* Random number mismatch. */
+        g_sm_sc_dbg_dhkey_check_fail++;
         res->sm_err = BLE_SM_ERR_DHKEY;
         res->app_status = BLE_HS_SM_US_ERR(BLE_SM_ERR_DHKEY);
         res->enc_cb = 1;
         return;
     }
+    g_sm_sc_dbg_dhkey_check_ok++;
+    g_sm_sc_dbg_last_pair_alg = proc->pair_alg;
 
     rc = ble_sm_sc_io_action(proc, &ioact);
     if (rc != 0) {
@@ -845,6 +866,7 @@ ble_sm_sc_dhkey_check_rx(uint16_t conn_handle, struct os_mbuf **om,
     }
 
     cmd = (struct ble_sm_dhkey_check *)(*om)->om_data;
+    g_sm_sc_dbg_dhkey_rx++;
 
     ble_hs_lock();
     proc = ble_sm_proc_find(conn_handle, BLE_SM_PROC_STATE_DHKEY_CHECK, -1,

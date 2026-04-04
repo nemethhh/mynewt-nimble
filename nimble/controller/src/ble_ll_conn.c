@@ -57,6 +57,51 @@ extern void bletest_completed_pkt(uint16_t handle);
 struct ble_ll_conn_sm *g_ble_ll_conn_css_ref;
 #endif
 
+/* Encryption debug trace — read via GDB after failure */
+volatile int g_enc_dbg_step = 0;       /* highest step reached */
+volatile int g_enc_dbg_ltk_ev_rc = -99; /* ble_ll_hci_ev_ltk_req return */
+volatile uint8_t g_enc_dbg_state = 0;  /* enc_state snapshot */
+volatile uint8_t g_enc_dbg_tx_end_trans = 0xff;  /* end_transition when START_ENC_REQ TX'd */
+volatile uint8_t g_enc_dbg_tx_md = 0xff;         /* MD bit when START_ENC_REQ TX'd */
+volatile uint8_t g_enc_dbg_tx_last_rxd_md = 0xff; /* central's last MD bit */
+volatile uint8_t g_enc_dbg_ce_encrypted = 0xff;  /* encrypted flag at next CE start */
+volatile uint8_t g_enc_dbg_rx_enc_cb = 0;        /* start_rx_encrypt callback fired */
+volatile uint32_t g_enc_dbg_boot_sentinel = 0;   /* set to 0xDEADBEEF at init; 0 = crashed */
+volatile uint32_t g_enc_dbg_rx_start_enc_rsp = 0;  /* ble_ll_ctrl_rx_start_enc_rsp called */
+volatile uint8_t  g_enc_dbg_rx_ser_state = 0;       /* enc_state when rx_start_enc_rsp called */
+volatile uint8_t  g_enc_dbg_rx_ser_rc = 0xff;       /* return value of rx_start_enc_rsp */
+volatile uint32_t g_enc_dbg_tx_start_enc_rsp = 0;   /* TX path for START_ENC_RSP reached */
+volatile uint8_t  g_enc_dbg_enc_state_final = 0;    /* enc_state at WDT time */
+
+/* P0 MIC debug: ECB input/output capture for session key verification */
+volatile uint8_t g_enc_dbg_ltk_be[16];    /* LTK in BE (after swap_buf) = ECB key */
+volatile uint8_t g_enc_dbg_ltk_hci[16];   /* LTK as received from HCI (LE order) */
+volatile uint8_t g_enc_dbg_skd_be[16];    /* SKD in BE (after swap_buf) = ECB plaintext */
+volatile uint8_t g_enc_dbg_sk_be[16];     /* Session key in BE = ECB ciphertext */
+volatile uint8_t g_enc_dbg_iv[8];         /* IV (IVm || IVs) */
+
+/* Connection event debug counters — non-invasive */
+volatile uint32_t g_conn_dbg_ce_count = 0;       /* total connection events started */
+volatile uint32_t g_conn_dbg_ce_periph = 0;      /* peripheral connection events */
+volatile uint32_t g_conn_dbg_rx_isr_end = 0;     /* ble_ll_conn_rx_isr_end calls */
+volatile uint32_t g_conn_dbg_rx_ctrl_pdu = 0;    /* LL control PDUs received */
+volatile uint32_t g_conn_dbg_rx_data_pdu = 0;    /* LL data PDUs received */
+volatile uint32_t g_conn_dbg_tx_pdu = 0;         /* PDUs transmitted */
+volatile uint32_t g_conn_dbg_disconnect = 0;     /* disconnection events */
+volatile uint8_t  g_conn_dbg_last_disc_reason = 0; /* last disconnect reason */
+volatile uint8_t  g_conn_dbg_conn_state = 0;     /* last connection state */
+volatile uint8_t  g_conn_dbg_enc_state = 0;      /* last enc_state */
+volatile uint8_t  g_conn_dbg_txend_cb_fired = 0; /* txend_func callback invoked */
+volatile uint32_t g_conn_dbg_supvn_tmo = 0;      /* supervision timeout events */
+volatile uint32_t g_conn_dbg_data_txg = 0;       /* ACKed data PDUs */
+volatile uint32_t g_conn_dbg_data_txf = 0;       /* unacked / retried data PDUs */
+volatile uint32_t g_conn_dbg_last_tx_pkt_cntr = 0xffffffff; /* tx pkt ctr at ACK check */
+volatile uint32_t g_conn_dbg_last_tx_pkt_cntr_ack = 0xffffffff; /* tx pkt ctr after ACK */
+volatile uint32_t g_conn_dbg_last_rx_pkt_cntr = 0xffffffff; /* rx pkt ctr after valid RX */
+volatile uint8_t  g_conn_dbg_last_ack = 0xff;    /* 1=acked, 0=not acked */
+volatile uint8_t  g_conn_dbg_last_hdr_nesn = 0xff; /* NESN bit from last RX header */
+volatile uint8_t  g_conn_dbg_last_conn_sn = 0xff;  /* local tx seq bit at ACK check */
+
 /* XXX TODO
  * 1) I think if we are initiating and we already have a connection with
  * a device that we will still try and connect to it. Fix this.
@@ -858,11 +903,16 @@ ble_ll_conn_start_rx_encrypt(void *arg)
     struct ble_ll_conn_sm *connsm;
 
     connsm = (struct ble_ll_conn_sm *)arg;
+    g_conn_dbg_txend_cb_fired = 1;
     connsm->flags.encrypted = 1;
     ble_phy_encrypt_enable(connsm->enc_data.enc_block.cipher_text);
     ble_phy_encrypt_iv_set(connsm->enc_data.iv);
     ble_phy_encrypt_counter_set(connsm->enc_data.rx_pkt_cntr,
                                 !CONN_IS_CENTRAL(connsm));
+    { extern volatile uint8_t g_enc_dbg_rx_enc_cb;
+      extern volatile int g_enc_dbg_step;
+      g_enc_dbg_rx_enc_cb = 1;
+      g_enc_dbg_step = 8; }
 }
 
 #if MYNEWT_VAL(BLE_LL_ROLE_PERIPHERAL)
@@ -970,11 +1020,14 @@ ble_ll_conn_chk_csm_flags(struct ble_ll_conn_sm *connsm)
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     if (connsm->flags.encrypt_ltk_req) {
+        g_enc_dbg_step = 3;
+        g_enc_dbg_state = connsm->enc_data.enc_state;
         /*
          * Send Long term key request event to host. If masked, we need to
          * send a REJECT_IND or TERMINATE_IND.
          */
-        if (ble_ll_hci_ev_ltk_req(connsm)) {
+        g_enc_dbg_ltk_ev_rc = ble_ll_hci_ev_ltk_req(connsm);
+        if (g_enc_dbg_ltk_ev_rc) {
             /* Core 6.1 | Vol 6, Part B | 5.1.3.1
              * If this procedure is being performed after a Pause Encryption procedure, and the
              * Peripheral's Host does not provide a Long Term Key, the Peripheral shall perform the
@@ -1377,6 +1430,8 @@ conn_tx_pdu:
          * Both central and peripheral send the START_ENC_RSP encrypted and receive
          * encrypted
          */
+        { extern volatile uint32_t g_enc_dbg_tx_start_enc_rsp;
+          g_enc_dbg_tx_start_enc_rsp++; }
         connsm->flags.encrypted = 1;
         connsm->enc_data.tx_encrypted = 1;
         ble_phy_encrypt_enable(connsm->enc_data.enc_block.cipher_text);
@@ -1391,6 +1446,17 @@ conn_tx_pdu:
          * Only the peripheral sends this and it gets sent unencrypted but
          * we receive encrypted
          */
+        {
+            extern volatile uint8_t g_enc_dbg_tx_end_trans;
+            extern volatile uint8_t g_enc_dbg_tx_md;
+            extern volatile uint8_t g_enc_dbg_tx_last_rxd_md;
+            extern volatile int g_enc_dbg_step;
+            g_enc_dbg_step = 7;
+            g_enc_dbg_tx_end_trans = end_transition;
+            g_enc_dbg_tx_md = md;
+            g_enc_dbg_tx_last_rxd_md =
+                (connsm->last_rxd_hdr_byte & BLE_LL_DATA_HDR_MD_MASK) ? 1 : 0;
+        }
         connsm->flags.encrypted = 0;
         connsm->enc_data.enc_state = CONN_ENC_S_START_ENC_RSP_WAIT;
         connsm->enc_data.tx_encrypted = 0;
@@ -1518,6 +1584,9 @@ ble_ll_conn_event_start_cb(struct ble_ll_sched_item *sch)
 
     /* Log connection event start */
     ble_ll_trace_u32(BLE_LL_TRACE_ID_CONN_EV_START, connsm->conn_handle);
+    g_conn_dbg_ce_count++;
+    g_conn_dbg_conn_state = connsm->conn_state;
+    g_conn_dbg_enc_state = connsm->enc_data.enc_state;
 
     /* Disable whitelisting as connections do not use it */
     ble_ll_whitelist_disable();
@@ -1571,7 +1640,13 @@ ble_ll_conn_event_start_cb(struct ble_ll_sched_item *sch)
 #endif
 #if MYNEWT_VAL(BLE_LL_ROLE_PERIPHERAL)
     case BLE_LL_CONN_ROLE_PERIPHERAL:
+        g_conn_dbg_ce_periph++;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
+        { extern volatile uint8_t g_enc_dbg_ce_encrypted;
+          if (connsm->enc_data.enc_state > CONN_ENC_S_ENCRYPTED) {
+              g_enc_dbg_ce_encrypted = connsm->flags.encrypted;
+          }
+        }
         if (connsm->flags.encrypted) {
             ble_phy_encrypt_enable(connsm->enc_data.enc_block.cipher_text);
             ble_phy_encrypt_iv_set(connsm->enc_data.iv);
@@ -2193,6 +2268,9 @@ ble_ll_conn_end(struct ble_ll_conn_sm *connsm, uint8_t ble_err)
     struct os_mbuf *m;
     struct os_mbuf_pkthdr *pkthdr;
     os_sr_t sr;
+
+    g_conn_dbg_disconnect++;
+    g_conn_dbg_last_disc_reason = ble_err;
 
     /* Remove scheduler events just in case */
     ble_ll_sched_rmv_elem(&connsm->conn_sch);
@@ -3060,6 +3138,7 @@ ble_ll_conn_event_end(struct ble_npl_event *ev)
     /* XXX: Convert to ticks to usecs calculation instead??? */
     tmo = ble_ll_tmr_u2t(tmo);
     if ((int32_t)(connsm->anchor_point - connsm->last_rxd_pdu_cputime) >= tmo) {
+        g_conn_dbg_supvn_tmo++;
         ble_ll_conn_end(connsm, ble_err);
         return;
     }
@@ -3617,12 +3696,14 @@ ble_ll_conn_rx_data_pdu(struct os_mbuf *rxpdu, struct ble_mbuf_hdr *hdr)
 
     if (llid == BLE_LL_LLID_CTRL) {
         /* Process control frame */
+        g_conn_dbg_rx_ctrl_pdu++;
         STATS_INC(ble_ll_conn_stats, rx_ctrl_pdus);
         if (ble_ll_ctrl_rx_pdu(connsm, rxpdu)) {
             STATS_INC(ble_ll_conn_stats, rx_malformed_ctrl_pdus);
         }
     } else {
         /* Count # of received l2cap frames and byes */
+        g_conn_dbg_rx_data_pdu++;
         STATS_INC(ble_ll_conn_stats, rx_l2cap_pdus);
         STATS_INCN(ble_ll_conn_stats, rx_l2cap_bytes, acl_len);
 
@@ -3695,6 +3776,7 @@ ble_ll_conn_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 
     rc = -1;
     connsm = g_ble_ll_conn_cur_sm;
+    g_conn_dbg_rx_isr_end++;
 
     /* Retrieve the header and payload length */
     hdr_byte = rxbuf[0];
@@ -3817,6 +3899,7 @@ ble_ll_conn_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
             if (connsm->flags.encrypted && !ble_ll_conn_is_empty_pdu(rxbuf)) {
                 ++connsm->enc_data.rx_pkt_cntr;
+                g_conn_dbg_last_rx_pkt_cntr = connsm->enc_data.rx_pkt_cntr;
             }
 #endif
         }
@@ -3831,13 +3914,22 @@ ble_ll_conn_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
         if (connsm->flags.empty_pdu_txd || connsm->cur_tx_pdu) {
             hdr_nesn = hdr_byte & BLE_LL_DATA_HDR_NESN_MASK;
             conn_sn = connsm->tx_seqnum;
+            g_conn_dbg_last_hdr_nesn = !!hdr_nesn;
+            g_conn_dbg_last_conn_sn = !!conn_sn;
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
+            g_conn_dbg_last_tx_pkt_cntr = connsm->enc_data.tx_pkt_cntr;
+#endif
             if ((hdr_nesn && conn_sn) || (!hdr_nesn && !conn_sn)) {
                 /* We did not get an ACK. Must retry the PDU */
                 STATS_INC(ble_ll_conn_stats, data_pdu_txf);
+                g_conn_dbg_data_txf++;
+                g_conn_dbg_last_ack = 0;
             } else {
                 /* Transmit success */
                 connsm->tx_seqnum ^= 1;
                 STATS_INC(ble_ll_conn_stats, data_pdu_txg);
+                g_conn_dbg_data_txg++;
+                g_conn_dbg_last_ack = 1;
 
                 /* If we transmitted the empty pdu, clear flag */
                 if (connsm->flags.empty_pdu_txd) {
@@ -3854,6 +3946,8 @@ ble_ll_conn_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
                     if (connsm->enc_data.tx_encrypted) {
                         ++connsm->enc_data.tx_pkt_cntr;
+                        g_conn_dbg_last_tx_pkt_cntr_ack =
+                            connsm->enc_data.tx_pkt_cntr;
                     }
 #endif
                     txhdr = BLE_MBUF_HDR_PTR(txpdu);
@@ -4539,6 +4633,9 @@ ble_ll_conn_module_init(void)
     int rc;
     uint16_t i;
     struct ble_ll_conn_sm *connsm;
+
+    { extern volatile uint32_t g_enc_dbg_boot_sentinel;
+      g_enc_dbg_boot_sentinel = 0xDEADBEEF; }
 
     /* Initialize list of active connections */
     SLIST_INIT(&g_ble_ll_conn_active_list);

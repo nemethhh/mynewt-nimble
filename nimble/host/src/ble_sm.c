@@ -63,6 +63,52 @@
 /** Procedure timeout; 30 seconds. */
 #define BLE_SM_TIMEOUT_MS             (30000)
 
+/*
+ * SMP debug trace — non-invasive volatile counters readable via GDB post-mortem.
+ * These track the SMP pairing state machine to diagnose encryption failures
+ * without affecting timing.
+ */
+volatile uint32_t g_sm_dbg_pair_req_rx = 0;     /* pair request received */
+volatile uint32_t g_sm_dbg_pair_rsp_tx = 0;     /* pair response sent */
+volatile uint32_t g_sm_dbg_confirm_rx = 0;      /* confirm received */
+volatile uint32_t g_sm_dbg_random_rx = 0;       /* random received */
+volatile uint32_t g_sm_dbg_enc_start = 0;       /* encryption start event */
+volatile uint32_t g_sm_dbg_enc_ok = 0;          /* encryption success */
+volatile uint32_t g_sm_dbg_enc_fail = 0;        /* encryption failure */
+volatile uint32_t g_sm_dbg_fail_rx = 0;         /* pairing failed received */
+volatile uint8_t  g_sm_dbg_last_fail_reason = 0;/* last failure reason code */
+volatile uint8_t  g_sm_dbg_last_sm_err = 0;     /* last SMP error code */
+volatile uint8_t  g_sm_dbg_last_op_rx = 0;      /* last SMP opcode received */
+volatile uint8_t  g_sm_dbg_last_proc_state = 0; /* last proc state */
+volatile int      g_sm_dbg_last_app_status = 0; /* last app_status from result */
+volatile uint32_t g_sm_dbg_ltk_req = 0;         /* LTK request events */
+volatile uint32_t g_sm_dbg_pair_rsp_err = 0;    /* pair req errors */
+volatile uint8_t  g_sm_dbg_pair_req_iocap = 0;
+volatile uint8_t  g_sm_dbg_pair_req_oob = 0;
+volatile uint8_t  g_sm_dbg_pair_req_authreq = 0;
+volatile uint8_t  g_sm_dbg_pair_req_max_key = 0;
+volatile uint8_t  g_sm_dbg_pair_req_init_key_dist = 0;
+volatile uint8_t  g_sm_dbg_pair_req_resp_key_dist = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_iocap = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_oob = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_authreq = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_max_key = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_init_key_dist = 0;
+volatile uint8_t  g_sm_dbg_pair_rsp_resp_key_dist = 0;
+volatile uint32_t g_sm_dbg_key_exch_enter = 0;  /* key exchange state entered */
+volatile uint32_t g_sm_dbg_key_exch_ok = 0;     /* key exchange completed */
+volatile uint32_t g_sm_dbg_tx_enc_info = 0;     /* ENC_INFO sent */
+volatile uint32_t g_sm_dbg_tx_master_id = 0;    /* MASTER_ID sent */
+volatile uint32_t g_sm_dbg_tx_id_info = 0;      /* IDENTITY_INFO sent */
+volatile uint32_t g_sm_dbg_tx_id_addr = 0;      /* IDENTITY_ADDR_INFO sent */
+volatile uint32_t g_sm_dbg_tx_sign_info = 0;    /* SIGN_INFO sent */
+volatile uint32_t g_sm_dbg_pair_complete_evt = 0; /* pairing complete event */
+volatile int      g_sm_dbg_pair_complete_status = 0; /* pairing complete status */
+volatile uint32_t g_sm_dbg_persist_enter = 0;   /* reached ble_sm_persist_keys */
+volatile uint32_t g_sm_dbg_persist_identity_evt = 0; /* emitted identity event */
+volatile int      g_sm_dbg_persist_our_sec_rc = -99;
+volatile int      g_sm_dbg_persist_peer_sec_rc = -99;
+
 STAILQ_HEAD(ble_sm_proc_list, ble_sm_proc);
 
 typedef void ble_sm_rx_fn(uint16_t conn_handle, struct os_mbuf **om,
@@ -574,19 +620,21 @@ ble_sm_persist_keys(struct ble_sm_proc *proc)
 
     if (identity_ev) {
         /* Use peer_addr since it does have proper addr type (i.e. 0/1, not 2/3) */
+        g_sm_dbg_persist_identity_evt++;
         ble_gap_identity_event(proc->conn_handle, &peer_addr);
     }
 
+    g_sm_dbg_persist_enter++;
     authenticated = proc->flags & BLE_SM_PROC_F_AUTHENTICATED;
     sc = proc->flags & BLE_SM_PROC_F_SC;
 
     ble_sm_fill_store_value(&peer_addr, authenticated, sc, &proc->our_keys,
                             &value_sec);
-    ble_store_write_our_sec(&value_sec);
+    g_sm_dbg_persist_our_sec_rc = ble_store_write_our_sec(&value_sec);
 
     ble_sm_fill_store_value(&peer_addr, authenticated, sc, &proc->peer_keys,
                             &value_sec);
-    ble_store_write_peer_sec(&value_sec);
+    g_sm_dbg_persist_peer_sec_rc = ble_store_write_peer_sec(&value_sec);
 }
 
 static int
@@ -957,6 +1005,8 @@ ble_sm_process_result(uint16_t conn_handle, struct ble_sm_result *res,
         if (res->enc_cb &&
             res->app_status != BLE_HS_ENOTCONN) {
             /* Do not send this event on broken connection */
+            g_sm_dbg_pair_complete_evt++;
+            g_sm_dbg_pair_complete_status = res->sm_err;
             ble_gap_pairing_complete_event(conn_handle, res->sm_err);
         }
 
@@ -1128,6 +1178,17 @@ ble_sm_enc_event_rx(uint16_t conn_handle, uint8_t evt_status, int encrypted)
     int key_size;
 
     memset(&res, 0, sizeof res);
+
+    { extern volatile uint32_t g_sm_dbg_enc_start;
+      extern volatile uint32_t g_sm_dbg_enc_ok;
+      extern volatile uint32_t g_sm_dbg_enc_fail;
+      g_sm_dbg_enc_start++;
+      if (evt_status == 0 && encrypted) {
+          g_sm_dbg_enc_ok++;
+      } else if (evt_status != 0) {
+          g_sm_dbg_enc_fail++;
+      }
+    }
 
     /* Assume no change in authenticated and bonded statuses. */
     authenticated = 0;
@@ -1364,6 +1425,9 @@ ble_sm_ltk_req_rx(const struct ble_hci_ev_le_subev_lt_key_req *ev)
 
     uint16_t conn_handle = le16toh(ev->conn_handle);
 
+    { extern volatile uint32_t g_sm_dbg_ltk_req;
+      g_sm_dbg_ltk_req++; }
+
     memset(&res, 0, sizeof res);
 
     ble_hs_lock();
@@ -1488,6 +1552,9 @@ ble_sm_random_rx(uint16_t conn_handle, struct os_mbuf **om,
 
     cmd = (struct ble_sm_pair_random *)(*om)->om_data;
 
+    { extern volatile uint32_t g_sm_dbg_random_rx;
+      g_sm_dbg_random_rx++; }
+
     ble_hs_lock();
     proc = ble_sm_proc_find(conn_handle, BLE_SM_PROC_STATE_RANDOM, -1, NULL);
     if (proc == NULL) {
@@ -1535,6 +1602,9 @@ ble_sm_confirm_rx(uint16_t conn_handle, struct os_mbuf **om,
     }
 
     cmd = (struct ble_sm_pair_confirm *)(*om)->om_data;
+
+    { extern volatile uint32_t g_sm_dbg_confirm_rx;
+      g_sm_dbg_confirm_rx++; }
 
     ble_hs_lock();
     proc = ble_sm_proc_find(conn_handle, BLE_SM_PROC_STATE_CONFIRM, -1, NULL);
@@ -1788,6 +1858,15 @@ ble_sm_pair_req_rx(uint16_t conn_handle, struct os_mbuf **om,
 
     req = (struct ble_sm_pair_cmd *)(*om)->om_data;
 
+    { extern volatile uint32_t g_sm_dbg_pair_req_rx;
+      g_sm_dbg_pair_req_rx++; }
+    g_sm_dbg_pair_req_iocap = req->io_cap;
+    g_sm_dbg_pair_req_oob = req->oob_data_flag;
+    g_sm_dbg_pair_req_authreq = req->authreq;
+    g_sm_dbg_pair_req_max_key = req->max_enc_key_size;
+    g_sm_dbg_pair_req_init_key_dist = req->init_key_dist;
+    g_sm_dbg_pair_req_resp_key_dist = req->resp_key_dist;
+
     ble_hs_lock();
 
     /* XXX: Check connection state; reject if not appropriate. */
@@ -1875,11 +1954,25 @@ ble_sm_pair_req_rx(uint16_t conn_handle, struct os_mbuf **om,
              */
             ble_sm_pair_rsp_fill(proc);
             ble_sm_pair_cfg(proc);
+            {
+                const struct ble_sm_pair_cmd *rsp_dbg;
+
+                rsp_dbg = (struct ble_sm_pair_cmd *)&proc->pair_rsp[1];
+                g_sm_dbg_pair_rsp_iocap = rsp_dbg->io_cap;
+                g_sm_dbg_pair_rsp_oob = rsp_dbg->oob_data_flag;
+                g_sm_dbg_pair_rsp_authreq = rsp_dbg->authreq;
+                g_sm_dbg_pair_rsp_max_key = rsp_dbg->max_enc_key_size;
+                g_sm_dbg_pair_rsp_init_key_dist = rsp_dbg->init_key_dist;
+                g_sm_dbg_pair_rsp_resp_key_dist = rsp_dbg->resp_key_dist;
+            }
 
             proc_flags = proc->flags;
             key_size = proc->key_size;
             res->execute = 1;
         }
+    } else {
+        res->sm_err = BLE_SM_ERR_UNSPECIFIED;
+        res->app_status = BLE_HS_ENOMEM;
     }
 
     ble_hs_unlock();
@@ -1894,6 +1987,16 @@ ble_sm_pair_req_rx(uint16_t conn_handle, struct os_mbuf **om,
             res->app_status = rc;
             res->execute = 0;
         }
+    }
+
+    if (res->app_status == 0) {
+        extern volatile uint32_t g_sm_dbg_pair_rsp_tx;
+        g_sm_dbg_pair_rsp_tx++;
+    } else {
+        extern volatile uint32_t g_sm_dbg_pair_rsp_err;
+        extern volatile uint8_t g_sm_dbg_last_sm_err;
+        g_sm_dbg_pair_rsp_err++;
+        g_sm_dbg_last_sm_err = res->sm_err;
     }
 }
 
@@ -2087,6 +2190,8 @@ ble_sm_sec_req_rx(uint16_t conn_handle, struct os_mbuf **om,
 static void
 ble_sm_key_exch_success(struct ble_sm_proc *proc, struct ble_sm_result *res)
 {
+    g_sm_dbg_key_exch_ok++;
+
     /* The procedure is now complete.  Update connection bonded state and
      * terminate procedure.
      */
@@ -2122,6 +2227,8 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
     struct ble_store_gen_key gen_key;
     int ltk_gen = 0;
     int rc;
+
+    g_sm_dbg_key_exch_enter++;
 
     ble_sm_key_dist(proc, &init_key_dist, &resp_key_dist);
     if (proc->flags & BLE_SM_PROC_F_INITIATOR) {
@@ -2175,6 +2282,7 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         if (rc != 0) {
             goto err;
         }
+        g_sm_dbg_tx_enc_info++;
 
         /* Send master identification. */
         master_id = ble_sm_cmd_get(BLE_SM_OP_MASTER_ID, sizeof(*master_id),
@@ -2208,6 +2316,7 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         if (rc != 0) {
             goto err;
         }
+        g_sm_dbg_tx_master_id++;
     }
 
     if (our_key_dist & BLE_SM_PAIR_KEY_DIST_ID) {
@@ -2232,6 +2341,7 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         if (rc != 0) {
             goto err;
         }
+        g_sm_dbg_tx_id_info++;
 
         /* Send identity address information. */
         addr_info = ble_sm_cmd_get(BLE_SM_OP_IDENTITY_ADDR_INFO,
@@ -2256,6 +2366,7 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         if (rc != 0) {
             goto err;
         }
+        g_sm_dbg_tx_id_addr++;
     }
 
     if (our_key_dist & BLE_SM_PAIR_KEY_DIST_SIGN) {
@@ -2295,6 +2406,7 @@ ble_sm_key_exch_exec(struct ble_sm_proc *proc, struct ble_sm_result *res,
         if (rc != 0) {
             goto err;
         }
+        g_sm_dbg_tx_sign_info++;
     }
 
     if (proc->flags & BLE_SM_PROC_F_INITIATOR || proc->rx_key_flags == 0) {
@@ -2514,6 +2626,11 @@ ble_sm_fail_rx(uint16_t conn_handle, struct os_mbuf **om,
     if (res->app_status == 0) {
         cmd = (struct ble_sm_pair_fail *)(*om)->om_data;
 
+        { extern volatile uint32_t g_sm_dbg_fail_rx;
+          extern volatile uint8_t g_sm_dbg_last_fail_reason;
+          g_sm_dbg_fail_rx++;
+          g_sm_dbg_last_fail_reason = cmd->reason; }
+
         res->app_status = BLE_HS_SM_PEER_ERR(cmd->reason);
         res->sm_err =  cmd->reason;
     }
@@ -2729,7 +2846,16 @@ ble_sm_rx(struct ble_l2cap_chan *chan, struct os_mbuf **om)
     if (rx_cb != NULL) {
         memset(&res, 0, sizeof res);
 
+        { extern volatile uint8_t g_sm_dbg_last_op_rx;
+          g_sm_dbg_last_op_rx = op; }
+
         rx_cb(conn_handle, om, &res);
+
+        { extern volatile uint8_t g_sm_dbg_last_sm_err;
+          extern volatile int g_sm_dbg_last_app_status;
+          g_sm_dbg_last_sm_err = res.sm_err;
+          g_sm_dbg_last_app_status = res.app_status; }
+
         ble_sm_process_result(conn_handle, &res, op == BLE_SM_OP_PAIR_FAIL ?
                               false : true);
         rc = res.app_status;

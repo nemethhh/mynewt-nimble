@@ -1646,14 +1646,43 @@ ble_ll_conn_hci_le_ltk_reply(const uint8_t *cmdbuf, uint8_t len,
 #endif
 
     /* The connection should be awaiting a reply. If not, just discard */
+    extern volatile int g_enc_dbg_step;
+    extern volatile uint8_t g_enc_dbg_state;
+    g_enc_dbg_step = 4;
+    g_enc_dbg_state = connsm->enc_data.enc_state;
     if (connsm->enc_data.enc_state != CONN_ENC_S_LTK_REQ_WAIT) {
         rc = BLE_ERR_CMD_DISALLOWED;
         goto ltk_key_cmd_complete;
     }
 
     swap_buf(connsm->enc_data.enc_block.key, cmd->ltk, 16);
+    /* P0 MIC debug: capture ECB inputs before session key computation */
+    {
+        extern volatile uint8_t g_enc_dbg_ltk_be[16];
+        extern volatile uint8_t g_enc_dbg_skd_be[16];
+        extern volatile uint8_t g_enc_dbg_ltk_hci[16];
+        extern volatile uint8_t g_enc_dbg_iv[8];
+        int i;
+        for (i = 0; i < 16; i++) {
+            g_enc_dbg_ltk_be[i] = connsm->enc_data.enc_block.key[i];
+            g_enc_dbg_skd_be[i] = connsm->enc_data.enc_block.plain_text[i];
+            g_enc_dbg_ltk_hci[i] = cmd->ltk[i];
+        }
+        for (i = 0; i < 8; i++) {
+            g_enc_dbg_iv[i] = connsm->enc_data.iv[i];
+        }
+    }
     ble_ll_calc_session_key(connsm);
+    /* P0 MIC debug: capture ECB output (session key) */
+    {
+        extern volatile uint8_t g_enc_dbg_sk_be[16];
+        int i;
+        for (i = 0; i < 16; i++) {
+            g_enc_dbg_sk_be[i] = connsm->enc_data.enc_block.cipher_text[i];
+        }
+    }
     ble_ll_ctrl_start_enc_send(connsm);
+    g_enc_dbg_step = 5;
     rc = BLE_ERR_SUCCESS;
 
 ltk_key_cmd_complete:
