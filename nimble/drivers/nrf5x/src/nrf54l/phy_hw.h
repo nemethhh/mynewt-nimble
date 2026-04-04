@@ -127,17 +127,48 @@ uint32_t ble_phy_get_ccm_datarate(void);
 
 /*
  * CCM scatter/gather job lists and state.
- * Input: [Alen][Mlen][Adata][Mdata][END] — 5 entries
- * Output: [Adata][Mdata][END] — 3 entries
+ * Input:  [Alen][Mlen][Adata][Mdata][END] — 5 entries
+ * Output: [Alen][Mlen][Adata][Mdata][END] — 5 entries
+ * Both lists need ALEN+MLEN per datasheet Figs. 45-46.
  * Defined in nrf54l/phy.c.
  */
 extern struct sg_job_entry g_ccm_in_jl[5];
-extern struct sg_job_entry g_ccm_out_jl[3];
+extern struct sg_job_entry g_ccm_out_jl[5];
 extern uint16_t g_ccm_alen;
 extern uint16_t g_ccm_mlen;
+extern uint16_t g_ccm_out_alen;
+extern uint8_t g_ccm_out_adata;
+extern uint8_t g_ccm_adata_in;
+extern uint16_t g_ccm_out_mlen;
 extern uint8_t *g_ccm_in_ptr;
 extern uint8_t *g_ccm_out_ptr;
 extern uint8_t g_ccm_decrypt;
+extern struct nrf_ccm_data *g_ccm_data_ptr;  /* saved for deferred register setup */
+
+/* P0 MIC debug: capture KEY/NONCE/counter values (write-only registers) */
+extern volatile uint32_t g_phy_rx_enc_nonce[4];
+extern volatile uint32_t g_phy_rx_enc_key[4];
+extern volatile uint64_t g_phy_rx_enc_pkt_counter;
+extern volatile uint8_t  g_phy_rx_enc_dir_bit;
+extern volatile uint8_t  g_phy_rx_enc_iv[8];
+extern volatile uint8_t  g_phy_rx_enc_in[8];
+extern volatile uint32_t g_phy_rx_enc_mode;
+extern volatile uint32_t g_phy_rx_enc_enable;
+extern volatile uint8_t  g_phy_rx_enc_captured;
+extern volatile uint8_t  g_phy_rx_enc_in_at_start[8];
+extern volatile uint32_t g_phy_rx_enc_radio_state;
+/* Job list state at START time (before TX path overwrites) */
+extern volatile uint16_t g_phy_rx_enc_alen_at_start;
+extern volatile uint16_t g_phy_rx_enc_mlen_at_start;
+extern volatile uint32_t g_phy_rx_enc_mdata_attr_at_start;
+extern volatile uint32_t g_phy_rx_enc_mdata_ptr_at_start;
+extern volatile uint8_t  g_phy_rx_enc_adata_at_start;
+extern volatile uint32_t g_phy_rx_enc_adatamask_at_start;
+extern volatile uint32_t g_phy_rx_enc_subscribe_start;
+/* Live replay test: re-decrypt same data immediately after first MIC failure */
+extern volatile uint32_t g_phy_rx_enc_replay_macstatus;
+extern volatile uint8_t  g_phy_rx_enc_replay_pt;
+extern volatile uint32_t g_phy_rx_enc_replay_errorstatus;
 
 /*
  * nRF54L KEY.VALUE byte order is reversed vs nRF52/nRF53.
@@ -147,15 +178,40 @@ static inline void
 phy_hw_ccm_set_key(const uint8_t *key)
 {
     const uint32_t *kp = (const uint32_t *)key;
-    NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
-    NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
-    NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
-    NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+    uint32_t k0 = __builtin_bswap32(kp[3]);
+    uint32_t k1 = __builtin_bswap32(kp[2]);
+    uint32_t k2 = __builtin_bswap32(kp[1]);
+    uint32_t k3 = __builtin_bswap32(kp[0]);
+
+    /* Capture computed values before writing to write-only registers —
+     * RX only, first packet only (to avoid overwrite by subsequent CEs) */
+    if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
+        g_phy_rx_enc_key[0] = k0;
+        g_phy_rx_enc_key[1] = k1;
+        g_phy_rx_enc_key[2] = k2;
+        g_phy_rx_enc_key[3] = k3;
+    }
+
+    NRF_CCM->KEY.VALUE[0] = k0;
+    NRF_CCM->KEY.VALUE[1] = k1;
+    NRF_CCM->KEY.VALUE[2] = k2;
+    NRF_CCM->KEY.VALUE[3] = k3;
 }
 
 /*
- * Build 13-byte BLE CCM nonce from nrf_ccm_data fields,
- * then write reversed to NONCE.VALUE[0..3].
+ * Build BLE CCM nonce and write to NONCE.VALUE[0..3].
+ *
+ * nRF54L stores the nonce in reversed byte order vs nRF52/53.
+ * Standard BLE nonce (13 bytes): counter(5) | dir<<7|counter_msb | IV(8)
+ * nRF54L register layout:        IV(8) | dir<<7|counter_msb(1) | counter(4,BE)
+ *
+ * The reversed nonce is stored directly as LE words (no bswap).
+ * See datasheet v0.8, Section 8.4.2, page 234 — NONCE.VALUE example.
+ *
+ * NOTE: KEY and NONCE use DIFFERENT register conventions despite both
+ * being described as "reversed byte order".  KEY uses bswap32 + reversed
+ * word order; NONCE uses manually reversed bytes stored as plain LE words.
+ * Verified against datasheet NONCE example (IV=DEAFBABEBADCAB24, dir=1, ctr=1).
  */
 static inline void
 phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
@@ -163,18 +219,52 @@ phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
     uint8_t nonce[16];
     const uint32_t *np;
 
-    memcpy(&nonce[0], &ccm_data->pkt_counter, 5);
-    nonce[5] = ccm_data->dir_bit;
-    memcpy(&nonce[6], ccm_data->iv, 7);
+    /* Capture raw ccm_data fields for P0 MIC debug — only on RX (decrypt)
+     * path, first packet only to avoid overwrite by subsequent CEs. */
+    if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
+        g_phy_rx_enc_pkt_counter = ccm_data->pkt_counter;
+        g_phy_rx_enc_dir_bit = ccm_data->dir_bit;
+        memcpy((void *)g_phy_rx_enc_iv, ccm_data->iv, 8);
+    }
+
+    /*
+     * IV bytes must be reversed — the nRF54L nonce register stores the
+     * entire 13-byte BLE nonce in reversed byte order, packed as LE words.
+     * The counter and dir fields are already in the correct (reversed =
+     * big-endian) order below; the IV must also be byte-reversed.
+     */
+    nonce[0] = ccm_data->iv[7];
+    nonce[1] = ccm_data->iv[6];
+    nonce[2] = ccm_data->iv[5];
+    nonce[3] = ccm_data->iv[4];
+    nonce[4] = ccm_data->iv[3];
+    nonce[5] = ccm_data->iv[2];
+    nonce[6] = ccm_data->iv[1];
+    nonce[7] = ccm_data->iv[0];
+    nonce[8] = (ccm_data->dir_bit << 7) |
+               ((ccm_data->pkt_counter >> 32) & 0x7F);
+    nonce[9]  = (ccm_data->pkt_counter >> 24) & 0xFF;
+    nonce[10] = (ccm_data->pkt_counter >> 16) & 0xFF;
+    nonce[11] = (ccm_data->pkt_counter >> 8) & 0xFF;
+    nonce[12] = ccm_data->pkt_counter & 0xFF;
     nonce[13] = 0;
     nonce[14] = 0;
     nonce[15] = 0;
 
     np = (const uint32_t *)nonce;
-    NRF_CCM->NONCE.VALUE[0] = __builtin_bswap32(np[3]);
-    NRF_CCM->NONCE.VALUE[1] = __builtin_bswap32(np[2]);
-    NRF_CCM->NONCE.VALUE[2] = __builtin_bswap32(np[1]);
-    NRF_CCM->NONCE.VALUE[3] = __builtin_bswap32(np[0]);
+
+    /* Capture computed nonce values before writing — RX only, first pkt */
+    if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
+        g_phy_rx_enc_nonce[0] = np[0];
+        g_phy_rx_enc_nonce[1] = np[1];
+        g_phy_rx_enc_nonce[2] = np[2];
+        g_phy_rx_enc_nonce[3] = np[3];
+    }
+
+    NRF_CCM->NONCE.VALUE[0] = np[0];
+    NRF_CCM->NONCE.VALUE[1] = np[1];
+    NRF_CCM->NONCE.VALUE[2] = np[2];
+    NRF_CCM->NONCE.VALUE[3] = np[3];
 }
 
 /*
@@ -198,35 +288,93 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
     }
 
     g_ccm_alen = 1;
-    g_ccm_mlen = payload_len;
+    /*
+     * Per datasheet Fig. 45/46: input MLEN = l(m) for encrypt, l(c) for
+     * decrypt.  MLEN tells the CCM how many bytes are in the MDATA field.
+     */
+    g_ccm_mlen = mdata_in_len;
+
+    /*
+     * Pre-mask the ADATA (header) byte with the BLE header mask (0xE3)
+     * to zero out NESN/SN/MD bits before authentication.  This matches
+     * what the peer does when encrypting.  The CCM ADATAMASK register
+     * should do this automatically (reset value 0xE3), but we pre-mask
+     * here to be safe — double-masking is idempotent.
+     */
+    g_ccm_adata_in = in_buf[0] & 0xE3;
 
     /* Input job list */
     g_ccm_in_jl[0].ptr = (uint8_t *)&g_ccm_alen;
     g_ccm_in_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
     g_ccm_in_jl[1].ptr = (uint8_t *)&g_ccm_mlen;
     g_ccm_in_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
-    g_ccm_in_jl[2].ptr = in_buf;       /* S0 byte */
+    g_ccm_in_jl[2].ptr = &g_ccm_adata_in;  /* pre-masked S0 byte */
     g_ccm_in_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
     g_ccm_in_jl[3].ptr = in_buf + 3;   /* payload after S0/LEN/S1 */
     g_ccm_in_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_in_len;
     g_ccm_in_jl[4].ptr = NULL;
     g_ccm_in_jl[4].attr_and_length = 0;
 
-    /* Output job list */
-    g_ccm_out_jl[0].ptr = out_buf;     /* S0 passthrough */
-    g_ccm_out_jl[0].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
-    g_ccm_out_jl[1].ptr = out_buf + 3; /* payload after header slot */
-    g_ccm_out_jl[1].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_out_len;
-    g_ccm_out_jl[2].ptr = NULL;
-    g_ccm_out_jl[2].attr_and_length = 0;
+    /* Output job list — must include ALEN + MLEN per datasheet Fig. 45/46 */
+    g_ccm_out_jl[0].ptr = (uint8_t *)&g_ccm_out_alen;
+    g_ccm_out_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
+    /*
+     * MLEN output must NOT point at out_buf[1] (BLE LENGTH byte).
+     * The CCM hardware writes the plaintext message length here, which
+     * overwrites the BLE LENGTH field.  Redirect to a dummy so the
+     * caller-set LENGTH is preserved.
+     */
+    g_ccm_out_jl[1].ptr = (uint8_t *)&g_ccm_out_mlen;
+    g_ccm_out_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
+    /*
+     * CCM ADATA output may be masked by ADATAMASK (0xE3), which zeroes
+     * NESN/SN/MD bits.  Write it to a dummy so the pre-copied original
+     * header in out_buf[0] is preserved (see phy_hw_ccm_post_rx_decrypt).
+     */
+    g_ccm_out_jl[2].ptr = &g_ccm_out_adata;
+    g_ccm_out_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
+    g_ccm_out_jl[3].ptr = out_buf + 3; /* payload after header slot */
+    g_ccm_out_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_out_len;
+    g_ccm_out_jl[4].ptr = NULL;
+    g_ccm_out_jl[4].attr_and_length = 0;
 
     NRF_CCM->IN.PTR = (uint32_t)g_ccm_in_jl;
     NRF_CCM->OUT.PTR = (uint32_t)g_ccm_out_jl;
 }
 
+void ccm_selftest(void);
+
+extern volatile uint32_t g_ccm_test_enc_macstatus;
+extern volatile uint32_t g_ccm_test_enc_errorstatus;
+extern volatile uint32_t g_ccm_test_dec_macstatus;
+extern volatile uint32_t g_ccm_test_dec_errorstatus;
+extern volatile uint8_t  g_ccm_test_dec_plaintext;
+extern volatile uint8_t  g_ccm_test_ct[5];
+extern volatile uint32_t g_ccm_test_ran;
+
+/* Cold-decrypt test: decrypt without prior encrypt (tests CCM cold start) */
+extern volatile uint32_t g_ccm_cold_dec_macstatus;
+extern volatile uint32_t g_ccm_cold_dec_errorstatus;
+extern volatile uint8_t  g_ccm_cold_dec_plaintext;
+/* Global-jl test: decrypt using global job lists (tests stack vs global) */
+extern volatile uint32_t g_ccm_glob_dec_macstatus;
+extern volatile uint8_t  g_ccm_glob_dec_plaintext;
+/* Post-ECB test: decrypt after ECB with different key (tests H_new4) */
+extern volatile uint32_t g_ccm_ecb_dec_macstatus;
+extern volatile uint8_t  g_ccm_ecb_dec_plaintext;
+extern volatile uint32_t g_ccm_ecb_dec_errorstatus;
+/* Non-zero IV self-test — catches nonce byte-order bugs */
+extern volatile uint8_t  g_ccm_iv_test_ct[5];
+extern volatile uint32_t g_ccm_iv_test_enc_mac;
+extern volatile uint32_t g_ccm_iv_test_dec_mac;
+extern volatile uint8_t  g_ccm_iv_test_dec_pt;
+extern volatile uint32_t g_ccm_iv_test_enc_err;
+extern volatile uint32_t g_ccm_iv_test_dec_err;
+
 static inline void
 phy_hw_ccm_init(void)
 {
+    ccm_selftest();
 }
 
 static inline void
@@ -275,10 +423,18 @@ phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr,
     g_ccm_out_ptr = out_ptr;
     g_ccm_decrypt = 0;
 
+    /*
+     * Re-arm CCM explicitly for each TX packet. On nRF54L the RX path
+     * toggles ENABLE around deferred decrypt setup, so relying on stale
+     * peripheral state here can leave the next encrypted TX packet using an
+     * undefined configuration window.
+     */
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
     NRF_CCM->EVENTS_ERROR = 0;
     NRF_CCM->EVENTS_END = 0;
     NRF_CCM->MODE = (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
                     ble_phy_get_ccm_datarate();
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
     phy_hw_ccm_set_key(ccm_data->key);
     phy_hw_ccm_set_nonce(ccm_data);
 }
@@ -290,14 +446,15 @@ phy_hw_ccm_setup_rx(uint8_t *in_ptr, uint8_t *out_ptr,
     g_ccm_in_ptr = in_ptr;
     g_ccm_out_ptr = out_ptr;
     g_ccm_decrypt = 1;
+    g_ccm_data_ptr = ccm_data;
 
-    NRF_CCM->EVENTS_ERROR = 0;
-    NRF_CCM->EVENTS_END = 0;
-    NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
-                    (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
-                    ble_phy_get_ccm_datarate();
-    phy_hw_ccm_set_key(ccm_data->key);
-    phy_hw_ccm_set_nonce(ccm_data);
+    /*
+     * Defer all CCM register writes (MODE, KEY, NONCE) to
+     * post_rx_decrypt so they happen right before START.
+     * The self-test (which passes) writes everything just before
+     * START; the previous approach wrote KEY/NONCE here with a
+     * hundreds-of-µs gap before START, and MIC always failed.
+     */
 }
 
 static inline void
@@ -308,30 +465,84 @@ phy_hw_ccm_start(void)
         return;
     }
 
-    /* TX: build job lists now (payload is filled) and start encryption */
+    /* TX: build job lists now (payload is filled) and start encryption.
+     * Set output header — CCM MLEN/ADATA outputs go to dummies, so the
+     * RADIO-visible S0/LENGTH/S1 must be set explicitly here. */
     phy_hw_ccm_build_ble_job_lists(g_ccm_in_ptr, g_ccm_out_ptr,
                                    g_ccm_in_ptr[1], 0);
+    g_ccm_out_ptr[0] = g_ccm_in_ptr[0];       /* S0 (header byte) */
+    g_ccm_out_ptr[1] = g_ccm_in_ptr[1] + 4;   /* LENGTH = plaintext + MIC */
+    g_ccm_out_ptr[2] = 0;                      /* S1 */
+    __DSB();
     nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
 }
 
 /*
  * Post-receive CCM FastDecryption for nRF54L.
  * Called from rx_end_isr after full packet received.
- * Builds job lists, copies header fields, triggers decrypt.
+ *
+ * ALL CCM register setup (MODE, ENABLE, KEY, NONCE, job lists) is done
+ * here, right before START.  Previous approach wrote MODE/KEY/NONCE in
+ * setup_rx (hundreds of µs earlier) and MIC always failed, while the
+ * boot self-test (which writes everything just before START) passes.
+ * Deferring all writes eliminates any register-volatility or ENABLE-
+ * clearing issues.
+ *
+ * BLE LENGTH field (enc_buf[1]) includes the 4-byte MIC for encrypted
+ * packets, so plaintext_len = LENGTH - 4.
  */
 static inline void
 phy_hw_ccm_post_rx_decrypt(uint8_t *enc_buf, uint8_t *out_buf)
 {
-    uint16_t mlen = enc_buf[1];
+    uint16_t ble_len = enc_buf[1];
+    uint16_t plaintext_len = (ble_len >= 4) ? (ble_len - 4) : 0;
 
-    /* Copy S0/LEN/S1 from encrypted buffer to output */
+    /* Copy S0/S1 from encrypted buffer; set LENGTH to plaintext size. */
     out_buf[0] = enc_buf[0];
-    out_buf[1] = enc_buf[1];
+    out_buf[1] = plaintext_len;
     out_buf[2] = enc_buf[2];
 
-    phy_hw_ccm_build_ble_job_lists(enc_buf, out_buf, mlen, 1);
-
+    /*
+     * Full CCM setup — matches self-test sequence:
+     *   ENABLE=0 → MODE → ENABLE=2 → events → KEY → NONCE →
+     *   job lists → IN.PTR/OUT.PTR → DSB → START
+     */
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                    (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    ble_phy_get_ccm_datarate();
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
     NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->EVENTS_ERROR = 0;
+
+    phy_hw_ccm_set_key(g_ccm_data_ptr->key);
+    phy_hw_ccm_set_nonce(g_ccm_data_ptr);
+
+    phy_hw_ccm_build_ble_job_lists(enc_buf, out_buf, plaintext_len, 1);
+
+    __DSB();
+
+    /* First-packet diagnostics — capture everything at START time */
+    if (!g_phy_rx_enc_captured) {
+        int _i;
+        g_phy_rx_enc_mode = NRF_CCM->MODE;
+        g_phy_rx_enc_enable = NRF_CCM->ENABLE;
+        g_phy_rx_enc_radio_state = NRF_RADIO->STATE;
+        for (_i = 0; _i < 8; _i++) {
+            g_phy_rx_enc_in_at_start[_i] = enc_buf[_i];
+        }
+        /* Job list state at START time (before TX path overwrites) */
+        g_phy_rx_enc_alen_at_start = g_ccm_alen;
+        g_phy_rx_enc_mlen_at_start = g_ccm_mlen;
+        g_phy_rx_enc_mdata_attr_at_start = g_ccm_in_jl[3].attr_and_length;
+        g_phy_rx_enc_mdata_ptr_at_start = (uint32_t)g_ccm_in_jl[3].ptr;
+        g_phy_rx_enc_adata_at_start = g_ccm_adata_in;
+        /* ADATAMASK and SUBSCRIBE_START registers */
+        g_phy_rx_enc_adatamask_at_start =
+            *(volatile uint32_t *)0x50046548;
+        g_phy_rx_enc_subscribe_start = NRF_CCM->SUBSCRIBE_START;
+        g_phy_rx_enc_captured = 1;
+    }
     nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
 }
 

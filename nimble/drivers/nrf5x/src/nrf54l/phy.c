@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 #include <nrfx.h>
+#include <hal/nrf_ecb.h>
 #include <controller/ble_fem.h>
 #include "phy_ppi.h"
 
@@ -33,16 +34,540 @@ uint16_t g_nrf_aar_out_status;
 
 /* CCM scatter/gather job lists and state */
 struct sg_job_entry g_ccm_in_jl[5];
-struct sg_job_entry g_ccm_out_jl[3];
+struct sg_job_entry g_ccm_out_jl[5];
 uint16_t g_ccm_alen;
 uint16_t g_ccm_mlen;
+uint16_t g_ccm_out_alen;
+uint8_t g_ccm_out_adata;   /* sink for CCM ADATA output (may be masked) */
+uint8_t g_ccm_adata_in;    /* pre-masked ADATA input byte */
+uint16_t g_ccm_out_mlen;  /* sink for CCM MLEN output — must not overwrite BLE LENGTH */
 uint8_t *g_ccm_in_ptr;
 uint8_t *g_ccm_out_ptr;
 uint8_t g_ccm_decrypt;
+struct nrf_ccm_data *g_ccm_data_ptr;  /* saved for deferred register setup */
 
 /* AAR scatter/gather job lists */
 struct sg_job_entry g_aar_in_jl[19];
 struct sg_job_entry g_aar_out_jl[2];
+
+/*
+ * CCM hardware self-test results — readable via GDB.
+ * Encrypts 1 byte (0x06) then decrypts it.  If both pass,
+ * the scatter-gather setup is correct.
+ */
+volatile uint32_t g_ccm_test_enc_macstatus;
+volatile uint32_t g_ccm_test_enc_errorstatus;
+volatile uint32_t g_ccm_test_dec_macstatus;
+volatile uint32_t g_ccm_test_dec_errorstatus;
+volatile uint8_t  g_ccm_test_dec_plaintext;
+volatile uint8_t  g_ccm_test_ct[5]; /* ciphertext(1) + MIC(4) */
+volatile uint32_t g_ccm_test_ran = 0;
+
+/* Cold-decrypt test results */
+volatile uint32_t g_ccm_cold_dec_macstatus;
+volatile uint32_t g_ccm_cold_dec_errorstatus;
+volatile uint8_t  g_ccm_cold_dec_plaintext;
+/* Global job-list test results */
+volatile uint32_t g_ccm_glob_dec_macstatus;
+volatile uint8_t  g_ccm_glob_dec_plaintext;
+/* Post-ECB interference test results */
+volatile uint32_t g_ccm_ecb_dec_macstatus;
+volatile uint8_t  g_ccm_ecb_dec_plaintext;
+volatile uint32_t g_ccm_ecb_dec_errorstatus;
+/* Non-zero IV self-test results — the critical test that catches nonce byte-order bugs */
+volatile uint8_t  g_ccm_iv_test_ct[5];     /* hardware encrypt output */
+volatile uint32_t g_ccm_iv_test_enc_mac;
+volatile uint32_t g_ccm_iv_test_dec_mac;
+volatile uint8_t  g_ccm_iv_test_dec_pt;
+volatile uint32_t g_ccm_iv_test_enc_err;
+volatile uint32_t g_ccm_iv_test_dec_err;
+
+void
+ccm_selftest(void)
+{
+    /* Known test vector — arbitrary key, nonce, adata, 1-byte plaintext */
+    static const uint8_t test_key[16] = {
+        0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+        0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10
+    };
+
+    struct sg_job_entry in_jl[5];
+    struct sg_job_entry out_jl[5];
+    uint16_t alen = 1;
+    uint16_t mlen_enc = 1;   /* plaintext length for encrypt */
+    uint16_t mlen_dec = 5;   /* ciphertext+MIC length for decrypt */
+    uint16_t out_alen = 0;
+    uint16_t out_mlen = 0;
+    uint8_t adata_in = 0x03; /* masked BLE header */
+    uint8_t out_adata = 0;
+    uint8_t plaintext = 0x06; /* LL_START_ENC_RSP */
+    uint8_t enc_out[5] = {0}; /* ciphertext(1) + MIC(4) */
+    uint8_t dec_out = 0;
+
+    /* ---- Set up KEY (bswap32 + reversed word order) ---- */
+    const uint32_t *kp = (const uint32_t *)test_key;
+    NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+    NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+    NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+    NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+
+    /* ---- Set up NONCE (IV=0, dir=1, counter=0) ---- */
+    NRF_CCM->NONCE.VALUE[0] = 0;
+    NRF_CCM->NONCE.VALUE[1] = 0;
+    NRF_CCM->NONCE.VALUE[2] = 0x00000080; /* dir=1 */
+    NRF_CCM->NONCE.VALUE[3] = 0;
+
+    /* ==== ENCRYPT ==== */
+    NRF_CCM->MODE = (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+    NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->EVENTS_ERROR = 0;
+
+    mlen_enc = 1;
+    in_jl[0].ptr = (uint8_t *)&alen;
+    in_jl[0].attr_and_length = (11 << 24) | 2;
+    in_jl[1].ptr = (uint8_t *)&mlen_enc;
+    in_jl[1].attr_and_length = (12 << 24) | 2;
+    in_jl[2].ptr = &adata_in;
+    in_jl[2].attr_and_length = (13 << 24) | 1;
+    in_jl[3].ptr = &plaintext;
+    in_jl[3].attr_and_length = (14 << 24) | 1;
+    in_jl[4].ptr = NULL;
+    in_jl[4].attr_and_length = 0;
+
+    out_jl[0].ptr = (uint8_t *)&out_alen;
+    out_jl[0].attr_and_length = (11 << 24) | 2;
+    out_jl[1].ptr = (uint8_t *)&out_mlen;
+    out_jl[1].attr_and_length = (12 << 24) | 2;
+    out_jl[2].ptr = &out_adata;
+    out_jl[2].attr_and_length = (13 << 24) | 1;
+    out_jl[3].ptr = enc_out;
+    out_jl[3].attr_and_length = (14 << 24) | 5; /* CT(1) + MIC(4) */
+    out_jl[4].ptr = NULL;
+    out_jl[4].attr_and_length = 0;
+
+    NRF_CCM->IN.PTR = (uint32_t)in_jl;
+    NRF_CCM->OUT.PTR = (uint32_t)out_jl;
+    __DSB();
+    nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+    while (NRF_CCM->EVENTS_END == 0) {}
+    g_ccm_test_enc_macstatus = NRF_CCM->MACSTATUS;
+    g_ccm_test_enc_errorstatus = NRF_CCM->ERRORSTATUS;
+    memcpy((void *)g_ccm_test_ct, enc_out, 5);
+
+    /* ==== DECRYPT ==== */
+    NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                    (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+    NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->EVENTS_ERROR = 0;
+
+    /* Re-write KEY and NONCE (same values) */
+    NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+    NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+    NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+    NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+    NRF_CCM->NONCE.VALUE[0] = 0;
+    NRF_CCM->NONCE.VALUE[1] = 0;
+    NRF_CCM->NONCE.VALUE[2] = 0x00000080;
+    NRF_CCM->NONCE.VALUE[3] = 0;
+
+    mlen_dec = 5;
+    in_jl[1].ptr = (uint8_t *)&mlen_dec;
+    in_jl[3].ptr = enc_out;
+    in_jl[3].attr_and_length = (14 << 24) | 5; /* CT(1) + MIC(4) */
+
+    out_mlen = 0;
+    out_jl[3].ptr = &dec_out;
+    out_jl[3].attr_and_length = (14 << 24) | 1; /* plaintext(1) */
+
+    NRF_CCM->IN.PTR = (uint32_t)in_jl;
+    NRF_CCM->OUT.PTR = (uint32_t)out_jl;
+    __DSB();
+    nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+    while (NRF_CCM->EVENTS_END == 0) {}
+    g_ccm_test_dec_macstatus = NRF_CCM->MACSTATUS;
+    g_ccm_test_dec_errorstatus = NRF_CCM->ERRORSTATUS;
+    g_ccm_test_dec_plaintext = dec_out;
+
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+
+    /*
+     * ==== COLD DECRYPT TEST ====
+     * Decrypt the known ciphertext WITHOUT a preceding encrypt.
+     * CCM is fully disabled/reset.  This tests whether FastDecryption
+     * works from a cold state (matching the BLE RX flow).
+     * Known CT+MIC from encrypt above: enc_out[0..4]
+     */
+    {
+        struct sg_job_entry cd_in[5];
+        struct sg_job_entry cd_out[5];
+        uint16_t cd_alen = 1;
+        uint16_t cd_mlen = 5;       /* ciphertext + MIC */
+        uint16_t cd_out_alen = 0;
+        uint16_t cd_out_mlen = 0;
+        uint8_t cd_adata = 0x03;
+        uint8_t cd_out_adata = 0;
+        uint8_t cd_dec_out = 0;
+
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+        NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                        (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                        (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+        NRF_CCM->EVENTS_END = 0;
+        NRF_CCM->EVENTS_ERROR = 0;
+
+        NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+        NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+        NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+        NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+        NRF_CCM->NONCE.VALUE[0] = 0;
+        NRF_CCM->NONCE.VALUE[1] = 0;
+        NRF_CCM->NONCE.VALUE[2] = 0x00000080;
+        NRF_CCM->NONCE.VALUE[3] = 0;
+
+        cd_in[0].ptr = (uint8_t *)&cd_alen;
+        cd_in[0].attr_and_length = (11 << 24) | 2;
+        cd_in[1].ptr = (uint8_t *)&cd_mlen;
+        cd_in[1].attr_and_length = (12 << 24) | 2;
+        cd_in[2].ptr = &cd_adata;
+        cd_in[2].attr_and_length = (13 << 24) | 1;
+        cd_in[3].ptr = enc_out;
+        cd_in[3].attr_and_length = (14 << 24) | 5;
+        cd_in[4].ptr = NULL;
+        cd_in[4].attr_and_length = 0;
+
+        cd_out[0].ptr = (uint8_t *)&cd_out_alen;
+        cd_out[0].attr_and_length = (11 << 24) | 2;
+        cd_out[1].ptr = (uint8_t *)&cd_out_mlen;
+        cd_out[1].attr_and_length = (12 << 24) | 2;
+        cd_out[2].ptr = &cd_out_adata;
+        cd_out[2].attr_and_length = (13 << 24) | 1;
+        cd_out[3].ptr = &cd_dec_out;
+        cd_out[3].attr_and_length = (14 << 24) | 1;
+        cd_out[4].ptr = NULL;
+        cd_out[4].attr_and_length = 0;
+
+        NRF_CCM->IN.PTR = (uint32_t)cd_in;
+        NRF_CCM->OUT.PTR = (uint32_t)cd_out;
+        __DSB();
+        nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+        while (NRF_CCM->EVENTS_END == 0) {}
+        g_ccm_cold_dec_macstatus = NRF_CCM->MACSTATUS;
+        g_ccm_cold_dec_errorstatus = NRF_CCM->ERRORSTATUS;
+        g_ccm_cold_dec_plaintext = cd_dec_out;
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    }
+
+    /*
+     * ==== GLOBAL JOB-LIST DECRYPT TEST ====
+     * Same as cold decrypt but using the global g_ccm_in_jl/g_ccm_out_jl
+     * arrays (same memory as BLE flow).  Tests stack vs global issue.
+     */
+    {
+        uint16_t gl_alen = 1;
+        uint16_t gl_mlen = 5;
+        uint16_t gl_out_alen = 0;
+        uint16_t gl_out_mlen = 0;
+        uint8_t gl_adata = 0x03;
+        uint8_t gl_out_adata = 0;
+        uint8_t gl_dec_out = 0;
+
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+        NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                        (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                        (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+        NRF_CCM->EVENTS_END = 0;
+        NRF_CCM->EVENTS_ERROR = 0;
+
+        NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+        NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+        NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+        NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+        NRF_CCM->NONCE.VALUE[0] = 0;
+        NRF_CCM->NONCE.VALUE[1] = 0;
+        NRF_CCM->NONCE.VALUE[2] = 0x00000080;
+        NRF_CCM->NONCE.VALUE[3] = 0;
+
+        g_ccm_in_jl[0].ptr = (uint8_t *)&gl_alen;
+        g_ccm_in_jl[0].attr_and_length = (11 << 24) | 2;
+        g_ccm_in_jl[1].ptr = (uint8_t *)&gl_mlen;
+        g_ccm_in_jl[1].attr_and_length = (12 << 24) | 2;
+        g_ccm_in_jl[2].ptr = &gl_adata;
+        g_ccm_in_jl[2].attr_and_length = (13 << 24) | 1;
+        g_ccm_in_jl[3].ptr = enc_out;
+        g_ccm_in_jl[3].attr_and_length = (14 << 24) | 5;
+        g_ccm_in_jl[4].ptr = NULL;
+        g_ccm_in_jl[4].attr_and_length = 0;
+
+        g_ccm_out_jl[0].ptr = (uint8_t *)&gl_out_alen;
+        g_ccm_out_jl[0].attr_and_length = (11 << 24) | 2;
+        g_ccm_out_jl[1].ptr = (uint8_t *)&gl_out_mlen;
+        g_ccm_out_jl[1].attr_and_length = (12 << 24) | 2;
+        g_ccm_out_jl[2].ptr = &gl_out_adata;
+        g_ccm_out_jl[2].attr_and_length = (13 << 24) | 1;
+        g_ccm_out_jl[3].ptr = &gl_dec_out;
+        g_ccm_out_jl[3].attr_and_length = (14 << 24) | 1;
+        g_ccm_out_jl[4].ptr = NULL;
+        g_ccm_out_jl[4].attr_and_length = 0;
+
+        NRF_CCM->IN.PTR = (uint32_t)g_ccm_in_jl;
+        NRF_CCM->OUT.PTR = (uint32_t)g_ccm_out_jl;
+        __DSB();
+        nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+        while (NRF_CCM->EVENTS_END == 0) {}
+        g_ccm_glob_dec_macstatus = NRF_CCM->MACSTATUS;
+        g_ccm_glob_dec_plaintext = gl_dec_out;
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    }
+
+    /*
+     * ==== POST-ECB DECRYPT TEST (H_new4) ====
+     * Run ECB with a DIFFERENT key (simulating LTK-based session key
+     * derivation), then decrypt with CCM using the ORIGINAL test key.
+     * If ECB and CCM share the internal AES engine and the key schedule
+     * is cached, CCM will use the wrong key and MACSTATUS will fail.
+     * This exactly mirrors the BLE flow: ECB derives SK from LTK,
+     * then CCM decrypts with SK.
+     */
+    {
+        static const uint8_t ecb_key[16] = {
+            0xFF,0xFE,0xFD,0xFC,0xFB,0xFA,0xF9,0xF8,
+            0xF7,0xF6,0xF5,0xF4,0xF3,0xF2,0xF1,0xF0
+        };
+        static const uint8_t ecb_pt[16] = {
+            0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
+            0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99
+        };
+        uint8_t ecb_ct[16] = {0};
+
+        struct sg_job_entry ecb_in[2];
+        struct sg_job_entry ecb_out[2];
+
+        /* Run ECB with different key */
+        const uint32_t *ekp = (const uint32_t *)ecb_key;
+        NRF_ECB->KEY.VALUE[0] = __builtin_bswap32(ekp[3]);
+        NRF_ECB->KEY.VALUE[1] = __builtin_bswap32(ekp[2]);
+        NRF_ECB->KEY.VALUE[2] = __builtin_bswap32(ekp[1]);
+        NRF_ECB->KEY.VALUE[3] = __builtin_bswap32(ekp[0]);
+
+        ecb_in[0].ptr = (uint8_t *)ecb_pt;
+        ecb_in[0].attr_and_length = (11 << 24) | 16;
+        ecb_in[1].ptr = NULL;
+        ecb_in[1].attr_and_length = 0;
+        ecb_out[0].ptr = ecb_ct;
+        ecb_out[0].attr_and_length = (11 << 24) | 16;
+        ecb_out[1].ptr = NULL;
+        ecb_out[1].attr_and_length = 0;
+
+        NRF_ECB->EVENTS_END = 0;
+        NRF_ECB->EVENTS_ERROR = 0;
+        NRF_ECB->IN.PTR = (uint32_t)ecb_in;
+        NRF_ECB->OUT.PTR = (uint32_t)ecb_out;
+        nrf_ecb_task_trigger(NRF_ECB, NRF_ECB_TASK_START);
+        while (NRF_ECB->EVENTS_END == 0 && NRF_ECB->EVENTS_ERROR == 0) {}
+
+        /* Now decrypt with CCM using ORIGINAL test key.
+         * If AES key schedule is corrupted by ECB, this fails. */
+        {
+            struct sg_job_entry pe_in[5];
+            struct sg_job_entry pe_out[5];
+            uint16_t pe_alen = 1;
+            uint16_t pe_mlen = 5;
+            uint16_t pe_out_alen = 0;
+            uint16_t pe_out_mlen = 0;
+            uint8_t pe_adata = 0x03;
+            uint8_t pe_out_adata = 0;
+            uint8_t pe_dec_out = 0;
+
+            NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+            NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                            (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                            (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+            NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+            NRF_CCM->EVENTS_END = 0;
+            NRF_CCM->EVENTS_ERROR = 0;
+
+            /* Write ORIGINAL test key to CCM */
+            NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+            NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+            NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+            NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+            NRF_CCM->NONCE.VALUE[0] = 0;
+            NRF_CCM->NONCE.VALUE[1] = 0;
+            NRF_CCM->NONCE.VALUE[2] = 0x00000080;
+            NRF_CCM->NONCE.VALUE[3] = 0;
+
+            pe_in[0].ptr = (uint8_t *)&pe_alen;
+            pe_in[0].attr_and_length = (11 << 24) | 2;
+            pe_in[1].ptr = (uint8_t *)&pe_mlen;
+            pe_in[1].attr_and_length = (12 << 24) | 2;
+            pe_in[2].ptr = &pe_adata;
+            pe_in[2].attr_and_length = (13 << 24) | 1;
+            pe_in[3].ptr = enc_out; /* known CT from encrypt test */
+            pe_in[3].attr_and_length = (14 << 24) | 5;
+            pe_in[4].ptr = NULL;
+            pe_in[4].attr_and_length = 0;
+
+            pe_out[0].ptr = (uint8_t *)&pe_out_alen;
+            pe_out[0].attr_and_length = (11 << 24) | 2;
+            pe_out[1].ptr = (uint8_t *)&pe_out_mlen;
+            pe_out[1].attr_and_length = (12 << 24) | 2;
+            pe_out[2].ptr = &pe_out_adata;
+            pe_out[2].attr_and_length = (13 << 24) | 1;
+            pe_out[3].ptr = &pe_dec_out;
+            pe_out[3].attr_and_length = (14 << 24) | 1;
+            pe_out[4].ptr = NULL;
+            pe_out[4].attr_and_length = 0;
+
+            NRF_CCM->IN.PTR = (uint32_t)pe_in;
+            NRF_CCM->OUT.PTR = (uint32_t)pe_out;
+            __DSB();
+            nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+            while (NRF_CCM->EVENTS_END == 0) {}
+            g_ccm_ecb_dec_macstatus = NRF_CCM->MACSTATUS;
+            g_ccm_ecb_dec_errorstatus = NRF_CCM->ERRORSTATUS;
+            g_ccm_ecb_dec_plaintext = pe_dec_out;
+            NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+        }
+    }
+
+    /*
+     * ==== NON-ZERO IV SELF-TEST ====
+     * Uses IV=DEAFBABEBADCAB24 (datasheet example), dir=1, counter=0.
+     * Software AES-CCM gives CT+MIC = ae aa 6b 9f 7d.
+     * If hardware encrypt output differs, the nonce register encoding is wrong.
+     * This is the ONE test that catches nonce byte-order bugs — all previous
+     * tests used IV=0, making nonce[0..7] zero regardless of byte order.
+     */
+    {
+        static const uint8_t iv_test_iv[8] = {
+            0xDE,0xAF,0xBA,0xBE,0xBA,0xDC,0xAB,0x24
+        };
+        /* Expected CT+MIC from software AES-CCM: ae aa 6b 9f 7d
+         * (same key/adata/pt as main test, compared in GDB postmortem) */
+
+        struct sg_job_entry iv_in[5];
+        struct sg_job_entry iv_out[5];
+        uint16_t iv_alen = 1;
+        uint16_t iv_mlen_enc = 1;
+        uint16_t iv_mlen_dec = 5;
+        uint16_t iv_out_alen = 0;
+        uint16_t iv_out_mlen = 0;
+        uint8_t iv_adata = 0x03;
+        uint8_t iv_out_adata = 0;
+        uint8_t iv_pt = 0x06;
+        uint8_t iv_enc_out[5] = {0};
+        uint8_t iv_dec_out = 0;
+
+        /* Build nonce with real IV — IV bytes REVERSED per nRF54L convention */
+        uint8_t nonce[16];
+        int i;
+        for (i = 0; i < 8; i++) {
+            nonce[i] = iv_test_iv[7 - i];
+        }
+        nonce[8] = 0x80;  /* dir=1, counter_msb=0 */
+        nonce[9] = 0; nonce[10] = 0; nonce[11] = 0; nonce[12] = 0;
+        nonce[13] = 0; nonce[14] = 0; nonce[15] = 0;
+        const uint32_t *nvp = (const uint32_t *)nonce;
+
+        /* ENCRYPT with non-zero IV */
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+        NRF_CCM->MODE = (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                        (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+        NRF_CCM->EVENTS_END = 0;
+        NRF_CCM->EVENTS_ERROR = 0;
+
+        NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+        NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+        NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+        NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+        NRF_CCM->NONCE.VALUE[0] = nvp[0];
+        NRF_CCM->NONCE.VALUE[1] = nvp[1];
+        NRF_CCM->NONCE.VALUE[2] = nvp[2];
+        NRF_CCM->NONCE.VALUE[3] = nvp[3];
+
+        iv_in[0].ptr = (uint8_t *)&iv_alen;
+        iv_in[0].attr_and_length = (11 << 24) | 2;
+        iv_in[1].ptr = (uint8_t *)&iv_mlen_enc;
+        iv_in[1].attr_and_length = (12 << 24) | 2;
+        iv_in[2].ptr = &iv_adata;
+        iv_in[2].attr_and_length = (13 << 24) | 1;
+        iv_in[3].ptr = &iv_pt;
+        iv_in[3].attr_and_length = (14 << 24) | 1;
+        iv_in[4].ptr = NULL;
+        iv_in[4].attr_and_length = 0;
+
+        iv_out[0].ptr = (uint8_t *)&iv_out_alen;
+        iv_out[0].attr_and_length = (11 << 24) | 2;
+        iv_out[1].ptr = (uint8_t *)&iv_out_mlen;
+        iv_out[1].attr_and_length = (12 << 24) | 2;
+        iv_out[2].ptr = &iv_out_adata;
+        iv_out[2].attr_and_length = (13 << 24) | 1;
+        iv_out[3].ptr = iv_enc_out;
+        iv_out[3].attr_and_length = (14 << 24) | 5;
+        iv_out[4].ptr = NULL;
+        iv_out[4].attr_and_length = 0;
+
+        NRF_CCM->IN.PTR = (uint32_t)iv_in;
+        NRF_CCM->OUT.PTR = (uint32_t)iv_out;
+        __DSB();
+        nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+        while (NRF_CCM->EVENTS_END == 0) {}
+        g_ccm_iv_test_enc_mac = NRF_CCM->MACSTATUS;
+        g_ccm_iv_test_enc_err = NRF_CCM->ERRORSTATUS;
+        memcpy((void *)g_ccm_iv_test_ct, iv_enc_out, 5);
+
+        /* DECRYPT the hardware output (round-trip check) */
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+        NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                        (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                        (CCM_MODE_DATARATE_1Mbit << CCM_MODE_DATARATE_Pos);
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+        NRF_CCM->EVENTS_END = 0;
+        NRF_CCM->EVENTS_ERROR = 0;
+
+        NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+        NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+        NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+        NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+        NRF_CCM->NONCE.VALUE[0] = nvp[0];
+        NRF_CCM->NONCE.VALUE[1] = nvp[1];
+        NRF_CCM->NONCE.VALUE[2] = nvp[2];
+        NRF_CCM->NONCE.VALUE[3] = nvp[3];
+
+        iv_in[1].ptr = (uint8_t *)&iv_mlen_dec;
+        iv_in[3].ptr = iv_enc_out;
+        iv_in[3].attr_and_length = (14 << 24) | 5;
+
+        iv_out_mlen = 0;
+        iv_out[3].ptr = &iv_dec_out;
+        iv_out[3].attr_and_length = (14 << 24) | 1;
+
+        NRF_CCM->IN.PTR = (uint32_t)iv_in;
+        NRF_CCM->OUT.PTR = (uint32_t)iv_out;
+        __DSB();
+        nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+
+        while (NRF_CCM->EVENTS_END == 0) {}
+        g_ccm_iv_test_dec_mac = NRF_CCM->MACSTATUS;
+        g_ccm_iv_test_dec_err = NRF_CCM->ERRORSTATUS;
+        g_ccm_iv_test_dec_pt = iv_dec_out;
+        NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    }
+
+    g_ccm_test_ran = 1;
+}
 
 /* Create PPIB links between RADIO and PERI power domain. */
 #define PPIB_RADIO_PERI(_ch, _src, _dst)                  \

@@ -1695,6 +1695,9 @@ ble_ll_ctrl_rx_enc_req(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
 
     connsm->enc_data.enc_state = CONN_ENC_S_ENC_RSP_TO_BE_SENT;
 
+    extern volatile int g_enc_dbg_step;
+    g_enc_dbg_step = 1;
+
     /* In case we were already encrypted we need to reset packet counters */
     connsm->enc_data.rx_pkt_cntr = 0;
     connsm->enc_data.tx_pkt_cntr = 0;
@@ -1832,6 +1835,13 @@ static uint8_t
 ble_ll_ctrl_rx_start_enc_rsp(struct ble_ll_conn_sm *connsm)
 {
     int rc = 0;
+
+    {
+        extern volatile uint32_t g_enc_dbg_rx_start_enc_rsp;
+        extern volatile uint8_t g_enc_dbg_rx_ser_state;
+        g_enc_dbg_rx_start_enc_rsp++;
+        g_enc_dbg_rx_ser_state = connsm->enc_data.enc_state;
+    }
 
     /* Not in proper state. Discard */
     if (connsm->enc_data.enc_state != CONN_ENC_S_START_ENC_RSP_WAIT) {
@@ -3255,6 +3265,10 @@ ble_ll_ctrl_tx_done(struct os_mbuf *txpdu, struct ble_ll_conn_sm *connsm)
     case BLE_LL_CTRL_ENC_RSP:
         connsm->enc_data.enc_state = CONN_ENC_S_LTK_REQ_WAIT;
         connsm->flags.encrypt_ltk_req = 1;
+        { extern volatile int g_enc_dbg_step; g_enc_dbg_step = 2; }
+        break;
+    case BLE_LL_CTRL_START_ENC_REQ:
+        { extern volatile int g_enc_dbg_step; g_enc_dbg_step = 6; }
         break;
 #if MYNEWT_VAL(BLE_LL_ROLE_PERIPHERAL)
     case BLE_LL_CTRL_START_ENC_RSP:

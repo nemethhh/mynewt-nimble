@@ -26,6 +26,7 @@
 #include "sysinit/sysinit.h"
 #include "log/log.h"
 #include "host/ble_hs.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 
@@ -33,12 +34,71 @@ static uint8_t g_own_addr_type;
 static uint16_t conn_handle;
 static const char *device_name = "Mynewt";
 
+volatile uint32_t g_app_dbg_evt_seq = 0;
+volatile uint32_t g_app_dbg_connect_count = 0;
+volatile uint32_t g_app_dbg_connect_seq = 0;
+volatile int g_app_dbg_connect_status = -99;
+volatile int g_app_dbg_connect_handle = -1;
+volatile uint32_t g_app_dbg_disconnect_count = 0;
+volatile uint32_t g_app_dbg_disconnect_seq = 0;
+volatile int g_app_dbg_disconnect_reason = -99;
+volatile uint32_t g_app_dbg_enc_change_count = 0;
+volatile uint32_t g_app_dbg_enc_change_seq = 0;
+volatile int g_app_dbg_enc_change_status = -99;
+volatile int g_app_dbg_enc_change_handle = -1;
+volatile uint32_t g_app_dbg_pair_complete_count = 0;
+volatile uint32_t g_app_dbg_pair_complete_seq = 0;
+volatile int g_app_dbg_pair_complete_status = -99;
+volatile int g_app_dbg_pair_complete_handle = -1;
+volatile uint32_t g_app_dbg_repeat_pairing_count = 0;
+volatile uint32_t g_app_dbg_repeat_pairing_seq = 0;
+volatile int g_app_dbg_repeat_pairing_delete_rc = -99;
+volatile uint32_t g_app_dbg_store_status_count = 0;
+volatile uint32_t g_app_dbg_store_status_seq = 0;
+volatile int g_app_dbg_store_status_event_code = -99;
+volatile int g_app_dbg_store_status_obj_type = -99;
+volatile int g_app_dbg_store_status_conn_handle = -1;
+volatile int g_app_dbg_store_status_rc = -99;
+
 /* adv_event() calls advertise(), so forward declaration is required */
 static void advertise(void);
 
 static int
+debug_store_status_cb(struct ble_store_status_event *event, void *arg)
+{
+    int rc;
+
+    g_app_dbg_store_status_count++;
+    g_app_dbg_store_status_seq = ++g_app_dbg_evt_seq;
+    g_app_dbg_store_status_event_code = event->event_code;
+    g_app_dbg_store_status_obj_type = -1;
+    g_app_dbg_store_status_conn_handle = -1;
+
+    switch (event->event_code) {
+    case BLE_STORE_EVENT_OVERFLOW:
+        g_app_dbg_store_status_obj_type = event->overflow.obj_type;
+        break;
+    case BLE_STORE_EVENT_FULL:
+        g_app_dbg_store_status_obj_type = event->full.obj_type;
+        g_app_dbg_store_status_conn_handle = event->full.conn_handle;
+        break;
+    default:
+        break;
+    }
+
+    rc = ble_store_util_status_rr(event, arg);
+    g_app_dbg_store_status_rc = rc;
+
+    return rc;
+}
+
+static int
 adv_event(struct ble_gap_event *event, void *arg)
 {
+    struct ble_gap_conn_desc desc;
+    uint32_t seq;
+    int rc;
+
     switch (event->type) {
     case BLE_GAP_EVENT_ADV_COMPLETE:
         MODLOG_DFLT(INFO,"Advertising completed, termination code: %d\n",
@@ -46,11 +106,19 @@ adv_event(struct ble_gap_event *event, void *arg)
         advertise();
         break;
     case BLE_GAP_EVENT_CONNECT:
-        assert(event->connect.status == 0);
+        seq = ++g_app_dbg_evt_seq;
+        g_app_dbg_connect_count++;
+        g_app_dbg_connect_seq = seq;
+        g_app_dbg_connect_status = event->connect.status;
+        g_app_dbg_connect_handle = event->connect.conn_handle;
         MODLOG_DFLT(INFO, "connection %s; status=%d\n",
                     event->connect.status == 0 ? "established" : "failed",
                     event->connect.status);
-        conn_handle = event->connect.conn_handle;
+        if (event->connect.status == 0) {
+            conn_handle = event->connect.conn_handle;
+        } else {
+            advertise();
+        }
         break;
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
         /* connected device requests update of connection parameters,
@@ -61,6 +129,10 @@ adv_event(struct ble_gap_event *event, void *arg)
         MODLOG_DFLT(INFO, "connection parameters updated!\n");
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        seq = ++g_app_dbg_evt_seq;
+        g_app_dbg_disconnect_count++;
+        g_app_dbg_disconnect_seq = seq;
+        g_app_dbg_disconnect_reason = event->disconnect.reason;
         MODLOG_DFLT(INFO, "disconnect; reason=%d\n",
         event->disconnect.reason);
 
@@ -69,6 +141,46 @@ adv_event(struct ble_gap_event *event, void *arg)
 
         /* Connection terminated; resume advertising */
         advertise();
+        break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        seq = ++g_app_dbg_evt_seq;
+        g_app_dbg_enc_change_count++;
+        g_app_dbg_enc_change_seq = seq;
+        g_app_dbg_enc_change_status = event->enc_change.status;
+        g_app_dbg_enc_change_handle = event->enc_change.conn_handle;
+        MODLOG_DFLT(INFO, "encryption change; status=%d\n",
+                    event->enc_change.status);
+        break;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        struct ble_sm_io pkey = {0};
+        pkey.action = event->passkey.params.action;
+        if (pkey.action == BLE_SM_IOACT_NONE ||
+            pkey.action == BLE_SM_IOACT_NUMCMP) {
+            /* Just Works or SC numeric comparison — auto-accept */
+            pkey.numcmp_accept = 1;
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        }
+        break;
+    }
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        seq = ++g_app_dbg_evt_seq;
+        g_app_dbg_repeat_pairing_count++;
+        g_app_dbg_repeat_pairing_seq = seq;
+        /* Delete old bond and accept re-pairing */
+        rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        assert(rc == 0);
+        rc = ble_store_util_delete_peer(&desc.peer_id_addr);
+        g_app_dbg_repeat_pairing_delete_rc = rc;
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+    case BLE_GAP_EVENT_PAIRING_COMPLETE:
+        seq = ++g_app_dbg_evt_seq;
+        g_app_dbg_pair_complete_count++;
+        g_app_dbg_pair_complete_seq = seq;
+        g_app_dbg_pair_complete_status = event->pairing_complete.status;
+        g_app_dbg_pair_complete_handle = event->pairing_complete.conn_handle;
+        MODLOG_DFLT(INFO, "pairing complete; status=%d\n",
+                    event->pairing_complete.status);
         break;
     default:
         MODLOG_DFLT(ERROR, "Advertising event not handled,"
@@ -154,6 +266,7 @@ mynewt_main(int argc, char **argv)
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.store_status_cb = debug_store_status_cb;
 
     rc = ble_svc_gap_device_name_set(device_name);
     assert(rc == 0);
