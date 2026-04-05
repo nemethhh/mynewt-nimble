@@ -144,6 +144,11 @@ extern uint8_t *g_ccm_in_ptr;
 extern uint8_t *g_ccm_out_ptr;
 extern uint8_t g_ccm_decrypt;
 extern struct nrf_ccm_data *g_ccm_data_ptr;  /* saved for deferred register setup */
+extern volatile uint8_t  g_phy_tx_nonce8;       /* actual nonce[8] written to CCM for TX */
+extern volatile uint8_t  g_phy_tx_enc_captured; /* 1 = first TX packet captures frozen */
+extern volatile uint32_t g_phy_tx_enc_key[4];   /* KEY.VALUE as written for first TX pkt */
+extern volatile uint32_t g_phy_tx_enc_nonce[4]; /* NONCE.VALUE words for first TX pkt */
+extern volatile uint8_t  g_phy_tx_enc_iv_bytes[8]; /* raw iv bytes for first TX pkt */
 
 /* P0 MIC debug: capture KEY/NONCE/counter values (write-only registers) */
 extern volatile uint32_t g_phy_rx_enc_nonce[4];
@@ -183,13 +188,18 @@ phy_hw_ccm_set_key(const uint8_t *key)
     uint32_t k2 = __builtin_bswap32(kp[1]);
     uint32_t k3 = __builtin_bswap32(kp[0]);
 
-    /* Capture computed values before writing to write-only registers —
-     * RX only, first packet only (to avoid overwrite by subsequent CEs) */
+    /* Capture computed values before writing to write-only registers */
     if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
         g_phy_rx_enc_key[0] = k0;
         g_phy_rx_enc_key[1] = k1;
         g_phy_rx_enc_key[2] = k2;
         g_phy_rx_enc_key[3] = k3;
+    }
+    if (!g_ccm_decrypt && !g_phy_tx_enc_captured) {
+        g_phy_tx_enc_key[0] = k0;
+        g_phy_tx_enc_key[1] = k1;
+        g_phy_tx_enc_key[2] = k2;
+        g_phy_tx_enc_key[3] = k3;
     }
 
     NRF_CCM->KEY.VALUE[0] = k0;
@@ -219,12 +229,14 @@ phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
     uint8_t nonce[16];
     const uint32_t *np;
 
-    /* Capture raw ccm_data fields for P0 MIC debug — only on RX (decrypt)
-     * path, first packet only to avoid overwrite by subsequent CEs. */
+    /* Capture raw ccm_data fields for P0 MIC debug — first packet only */
     if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
         g_phy_rx_enc_pkt_counter = ccm_data->pkt_counter;
         g_phy_rx_enc_dir_bit = ccm_data->dir_bit;
         memcpy((void *)g_phy_rx_enc_iv, ccm_data->iv, 8);
+    }
+    if (!g_ccm_decrypt && !g_phy_tx_enc_captured) {
+        memcpy((void *)g_phy_tx_enc_iv_bytes, ccm_data->iv, 8);
     }
 
     /*
@@ -241,8 +253,21 @@ phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
     nonce[5] = ccm_data->iv[2];
     nonce[6] = ccm_data->iv[1];
     nonce[7] = ccm_data->iv[0];
-    nonce[8] = (ccm_data->dir_bit << 7) |
+    /*
+     * The controller already passes the BLE packet direction bit in the
+     * convention used by the other NimBLE PHY drivers:
+     *   - TX uses CONN_IS_CENTRAL(connsm)
+     *   - RX uses !CONN_IS_CENTRAL(connsm)
+     *
+     * The nRF54L datasheet documents a plain nonce direction bit and the
+     * working upstream drivers use the controller-provided value directly, so
+     * do not apply any nRF54L-specific inversion here.
+     */
+    nonce[8] = (ccm_data->dir_bit & 1) << 7 |
                ((ccm_data->pkt_counter >> 32) & 0x7F);
+    if (!g_ccm_decrypt) {
+        g_phy_tx_nonce8 = nonce[8];
+    }
     nonce[9]  = (ccm_data->pkt_counter >> 24) & 0xFF;
     nonce[10] = (ccm_data->pkt_counter >> 16) & 0xFF;
     nonce[11] = (ccm_data->pkt_counter >> 8) & 0xFF;
@@ -253,12 +278,19 @@ phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
 
     np = (const uint32_t *)nonce;
 
-    /* Capture computed nonce values before writing — RX only, first pkt */
+    /* Capture computed nonce values before writing — first pkt only */
     if (g_ccm_decrypt && !g_phy_rx_enc_captured) {
         g_phy_rx_enc_nonce[0] = np[0];
         g_phy_rx_enc_nonce[1] = np[1];
         g_phy_rx_enc_nonce[2] = np[2];
         g_phy_rx_enc_nonce[3] = np[3];
+    }
+    if (!g_ccm_decrypt && !g_phy_tx_enc_captured) {
+        g_phy_tx_enc_nonce[0] = np[0];
+        g_phy_tx_enc_nonce[1] = np[1];
+        g_phy_tx_enc_nonce[2] = np[2];
+        g_phy_tx_enc_nonce[3] = np[3];
+        g_phy_tx_enc_captured = 1;
     }
 
     NRF_CCM->NONCE.VALUE[0] = np[0];
