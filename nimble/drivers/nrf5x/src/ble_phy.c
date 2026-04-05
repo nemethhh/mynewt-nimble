@@ -201,6 +201,7 @@ volatile uint8_t  g_phy_rx_enc_out2 = 0;     /* out_buf[2] after CCM (MLEN high)
 volatile uint8_t  g_phy_rx_enc_out3 = 0;     /* out_buf[3] after CCM (first payload) */
 volatile uint32_t g_phy_rx_enc_nonzero_len = 0; /* packets where dptr[1] != 0 after CCM */
 volatile uint32_t g_phy_rx_enc_dup_drop = 0;    /* packets dropped by SN dup check */
+volatile uint32_t g_phy_rx_enc_empty_passthrough = 0; /* zero-length encrypted RX packets bypassed */
 /* P0 MIC debug: capture CCM nonce/key/input for failing decrypt */
 volatile uint32_t g_phy_rx_enc_nonce[4];      /* NONCE.VALUE[0..3] as written */
 volatile uint32_t g_phy_rx_enc_key[4];        /* KEY.VALUE[0..3] as written */
@@ -242,6 +243,17 @@ volatile uint8_t  g_phy_tx_enc_out0 = 0;      /* TX S0 after CCM */
 volatile uint8_t  g_phy_tx_enc_out1 = 0;      /* TX LENGTH after CCM */
 volatile uint8_t  g_phy_tx_enc_out2 = 0;      /* TX S1 after CCM */
 volatile uint8_t  g_phy_tx_enc_out3 = 0;      /* first ciphertext byte */
+volatile uint8_t  g_phy_tx_nonce8 = 0;        /* actual nonce[8] written to CCM for TX */
+volatile uint8_t  g_phy_tx_enc_captured = 0;  /* 1 = first TX packet captures frozen */
+volatile uint8_t  g_phy_tx_enc_pkt_captured = 0; /* 1 = first TX packet bytes frozen */
+volatile uint32_t g_phy_tx_enc_key[4];        /* KEY.VALUE as written (bswap32 + rev word) */
+volatile uint32_t g_phy_tx_enc_nonce[4];      /* NONCE.VALUE words as written */
+volatile uint8_t  g_phy_tx_enc_iv_bytes[8];   /* raw iv[0..7] passed to set_nonce */
+volatile uint8_t  g_phy_tx_enc_first_in[20];  /* first TX plaintext packet bytes */
+volatile uint8_t  g_phy_tx_enc_first_out[24]; /* first TX ciphertext packet bytes */
+volatile uint8_t  g_phy_tx_enc_first_in_len = 0;
+volatile uint8_t  g_phy_tx_enc_first_out_len = 0;
+volatile uint32_t g_phy_tx_enc_sw_empty = 0;  /* empty encrypted TX PDUs built in software */
 
 /* RF center frequency for each channel index (offset from 2400 MHz) */
 static const uint8_t g_ble_phy_chan_freq[BLE_PHY_NUM_CHANS] = {
@@ -1298,6 +1310,23 @@ ble_phy_rx_end_isr(void)
                     g_phy_rx_enc_in[i] = eb[i];
                 }
             }
+            if (g_phy_rx_enc_last_len == 0) {
+                uint8_t *encp = (uint8_t *)&g_ble_phy_enc_buf[0];
+
+                g_phy_rx_enc_empty_passthrough++;
+                g_phy_rx_enc_ccm_end++;
+                g_phy_rx_ccm_macstatus = 1;
+                dptr[0] = encp[0];
+                dptr[1] = 0;
+                dptr[2] = encp[2];
+                g_phy_rx_enc_ccm_adata = encp[0] & BLE_LL_PDU_HEADERMASK_DATA;
+                g_phy_rx_enc_out0 = dptr[0];
+                g_phy_rx_enc_out1 = dptr[1];
+                g_phy_rx_enc_out2 = dptr[2];
+                g_phy_rx_enc_out3 = 0;
+                g_phy_rx_enc_mic_ok++;
+                goto rx_encrypt_done;
+            }
             phy_hw_ccm_post_rx_decrypt(
                 (uint8_t *)&g_ble_phy_enc_buf[0], dptr);
 #endif
@@ -1367,6 +1396,7 @@ ble_phy_rx_end_isr(void)
                 ble_hdr->rxinfo.flags &= ~BLE_MBUF_HDR_F_CRC_OK;
                 g_phy_rx_enc_ccm_err++;
             }
+rx_encrypt_done:
         }
 #endif
     }
@@ -2022,6 +2052,9 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     uint8_t payload_len;
     uint8_t hdr_byte;
     uint32_t state;
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
+    uint8_t used_sw_ccm;
+#endif
 
     if (g_ble_phy_data.phy_transition_late) {
         ble_phy_disable();
@@ -2076,6 +2109,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
     /* Start key-stream generation and encryption (via short) */
     if (g_ble_phy_data.phy_encrypted) {
+        used_sw_ccm = 0;
         g_phy_tx_enc_enter++;
         g_phy_tx_enc_pkt_counter = g_nrf_ccm_data.pkt_counter;
         g_phy_tx_enc_dir_bit = g_nrf_ccm_data.dir_bit;
@@ -2083,8 +2117,22 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
         g_phy_tx_enc_in1 = dptr[1];
         g_phy_tx_enc_in2 = dptr[2];
         g_phy_tx_enc_in3 = payload_len ? dptr[3] : 0;
+        if (payload_len == 0) {
+            used_sw_ccm = 1;
+            g_phy_tx_enc_sw_empty++;
+            g_phy_tx_enc_macstatus = 1;
+            g_phy_tx_enc_errorstatus = 0;
+            pktptr[0] = hdr_byte;
+            pktptr[1] = 0;
+            pktptr[2] = 0;
+            g_phy_tx_enc_out0 = pktptr[0];
+            g_phy_tx_enc_out1 = pktptr[1];
+            g_phy_tx_enc_out2 = pktptr[2];
+            g_phy_tx_enc_out3 = 0;
+        }
 #if PHY_USE_HEADERMASK_WORKAROUND
-        if (g_ble_phy_data.phy_headermask != BLE_LL_PDU_HEADERMASK_DATA) {
+        if (!used_sw_ccm &&
+            g_ble_phy_data.phy_headermask != BLE_LL_PDU_HEADERMASK_DATA) {
             g_ble_phy_data.phy_headerbyte = dptr[0];
             dptr[0] &= g_ble_phy_data.phy_headermask;
             g_ble_phy_tx_buf[0] = 0xffffffff;
@@ -2092,34 +2140,55 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
             NRF_CCM->INTENSET = CCM_INTENSET_ENDKSGEN_Msk;
         }
 #endif
-        phy_hw_ccm_start();
+        if (!used_sw_ccm) {
+            phy_hw_ccm_start();
 
-        /*
-         * Unlike the nRF52 CCM flow, the nRF54L path builds the encrypted
-         * packet in RAM. Make sure the buffer is complete before the RADIO
-         * DMA can fetch it, otherwise larger encrypted L2CAP/SMP PDUs can be
-         * transmitted partially encrypted or stale.
-         */
-        g_phy_tx_enc_wait_end++;
-        while ((NRF_CCM_EVENTS_END == 0) && (NRF_CCM->EVENTS_ERROR == 0)) {
+            /*
+             * Unlike the nRF52 CCM flow, the nRF54L path builds the encrypted
+             * packet in RAM. Make sure the buffer is complete before the RADIO
+             * DMA can fetch it, otherwise larger encrypted L2CAP/SMP PDUs can be
+             * transmitted partially encrypted or stale.
+             */
+            g_phy_tx_enc_wait_end++;
+            while ((NRF_CCM_EVENTS_END == 0) && (NRF_CCM->EVENTS_ERROR == 0)) {
 #if BABBLESIM
-            tm_tick();
+                tm_tick();
 #endif
-        }
+            }
 
-        if (NRF_CCM_EVENTS_END) {
-            g_phy_tx_enc_ccm_end++;
-        }
-        if (NRF_CCM->EVENTS_ERROR) {
-            g_phy_tx_enc_ccm_err++;
-        }
+            if (NRF_CCM_EVENTS_END) {
+                g_phy_tx_enc_ccm_end++;
+            }
+            if (NRF_CCM->EVENTS_ERROR) {
+                g_phy_tx_enc_ccm_err++;
+            }
 
-        g_phy_tx_enc_macstatus = NRF_CCM_STATUS;
-        g_phy_tx_enc_errorstatus = NRF_CCM->ERRORSTATUS;
-        g_phy_tx_enc_out0 = pktptr[0];
-        g_phy_tx_enc_out1 = pktptr[1];
-        g_phy_tx_enc_out2 = pktptr[2];
-        g_phy_tx_enc_out3 = pktptr[3];
+            g_phy_tx_enc_macstatus = NRF_CCM_STATUS;
+            g_phy_tx_enc_errorstatus = NRF_CCM->ERRORSTATUS;
+            g_phy_tx_enc_out0 = pktptr[0];
+            g_phy_tx_enc_out1 = pktptr[1];
+            g_phy_tx_enc_out2 = pktptr[2];
+            g_phy_tx_enc_out3 = pktptr[3];
+        }
+        if (!g_phy_tx_enc_pkt_captured) {
+            uint8_t tx_in_len;
+            uint8_t tx_out_len;
+
+            tx_in_len = dptr[1] + 3;
+            tx_out_len = pktptr[1] + 3;
+            if (tx_in_len > sizeof(g_phy_tx_enc_first_in)) {
+                tx_in_len = sizeof(g_phy_tx_enc_first_in);
+            }
+            if (tx_out_len > sizeof(g_phy_tx_enc_first_out)) {
+                tx_out_len = sizeof(g_phy_tx_enc_first_out);
+            }
+
+            memcpy((void *)g_phy_tx_enc_first_in, dptr, tx_in_len);
+            memcpy((void *)g_phy_tx_enc_first_out, pktptr, tx_out_len);
+            g_phy_tx_enc_first_in_len = tx_in_len;
+            g_phy_tx_enc_first_out_len = tx_out_len;
+            g_phy_tx_enc_pkt_captured = 1;
+        }
     }
 #endif
 
