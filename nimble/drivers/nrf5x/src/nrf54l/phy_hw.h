@@ -96,8 +96,6 @@ extern uint8_t g_nrf_num_irks;
                                  RADIO_INTENSET00_CRCOK_Msk    | \
                                  RADIO_INTENSET00_CRCERROR_Msk)
 
-#define NRF_AAR_NIRK NRF_AAR->MAXRESOLVED
-
 /*
  * nRF54L AAR has no STATUS register for the resolved IRK index.
  * The resolved index is written to the output job list buffer (2 bytes LE).
@@ -111,6 +109,19 @@ phy_hw_aar_get_resolved_index(void)
     return 0;
 }
 #define NRF_AAR_STATUS phy_hw_aar_get_resolved_index()
+
+static inline void
+phy_hw_aar_resolv_enable(void)
+{
+    /* IRK scan count comes from the input job list; stop after first match. */
+    NRF_AAR->MAXRESOLVED = 1;
+}
+
+static inline void
+phy_hw_aar_resolv_disable(void)
+{
+    NRF_AAR->MAXRESOLVED = 0;
+}
 
 #define CCM_MODE_DATARATE_125Kbps CCM_MODE_DATARATE_125Kbit
 #define CCM_MODE_DATARATE_500Kbps CCM_MODE_DATARATE_500Kbit
@@ -646,25 +657,23 @@ phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
     int num_irks = g_nrf_num_irks;
     struct sg_job_entry *entry;
 
-    /* IRK entries start at index 2 (0=Hash, 1=Prand set in addrptr_set) */
+    /* IRK entries in the input job list define how many IRKs AAR scans. */
     entry = &g_aar_in_jl[2];
     for (i = 0; i < num_irks; i++) {
         entry->ptr = (uint8_t *)&irk_ptr[i * 4];
         entry->attr_and_length = (AAR_ATTR_IRK << 24) | 16;
         entry++;
     }
-    /* Terminate input job list */
     entry->ptr = NULL;
     entry->attr_and_length = 0;
 
-    /* Output: resolved IRK index/status word + terminator */
+    /* Output job list stores the first resolved IRK index as a 2-byte value. */
     g_nrf_aar_out_status = UINT16_MAX;
     g_aar_out_jl[0].ptr = (uint8_t *)&g_nrf_aar_out_status;
     g_aar_out_jl[0].attr_and_length = (11 << 24) | sizeof(g_nrf_aar_out_status);
     g_aar_out_jl[1].ptr = NULL;
     g_aar_out_jl[1].attr_and_length = 0;
 
-    NRF_AAR->MAXRESOLVED = num_irks;
     NRF_AAR->IN.PTR = (uint32_t)g_aar_in_jl;
     NRF_AAR->OUT.PTR = (uint32_t)g_aar_out_jl;
 }

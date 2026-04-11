@@ -1796,7 +1796,7 @@ ble_phy_init(void)
     NRF_AAR->EVENTS_END = 0;
     NRF_AAR->EVENTS_RESOLVED = 0;
     NRF_AAR->EVENTS_NOTRESOLVED = 0;
-    NRF_AAR_NIRK = 0;
+    phy_hw_aar_resolv_disable();
 #endif
 
     /* TIMER0 setup for PHY when using RTC */
@@ -2483,13 +2483,14 @@ ble_phy_max_data_pdu_pyld(void)
 void
 ble_phy_resolv_list_enable(void)
 {
-    NRF_AAR_NIRK = (uint32_t)g_nrf_num_irks;
+    phy_hw_aar_resolv_enable();
     g_ble_phy_data.phy_privacy = 1;
 }
 
 void
 ble_phy_resolv_list_disable(void)
 {
+    phy_hw_aar_resolv_disable();
     g_ble_phy_data.phy_privacy = 0;
 }
 #endif

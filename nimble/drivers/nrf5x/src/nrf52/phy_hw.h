@@ -38,6 +38,8 @@ struct nrf_ccm_data {
 
 #define NRF_RADIO_INTENSET NRF_RADIO->INTENSET
 
+extern uint8_t g_nrf_num_irks;
+
 #define NRF_AAR_NIRK NRF_AAR->NIRK
 #define NRF_AAR_IRKPTR NRF_AAR->IRKPTR
 #define NRF_AAR_ADDRPTR NRF_AAR->ADDRPTR
@@ -151,6 +153,18 @@ static inline void
 phy_hw_aar_addrptr_set(uint8_t *dptr)
 {
     NRF_AAR->ADDRPTR = (uint32_t)dptr;
+}
+
+static inline void
+phy_hw_aar_resolv_enable(void)
+{
+    NRF_AAR->NIRK = (uint32_t)g_nrf_num_irks;
+}
+
+static inline void
+phy_hw_aar_resolv_disable(void)
+{
+    NRF_AAR->NIRK = 0;
 }
 
 static inline void
