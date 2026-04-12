@@ -42,9 +42,10 @@ struct sg_job_entry {
     uint32_t attr_and_length;
 };
 
-#define AAR_ATTR_HASH  11
-#define AAR_ATTR_PRAND 12
-#define AAR_ATTR_IRK   13
+#define AAR_ATTR_HASH   11
+#define AAR_ATTR_PRAND  12
+#define AAR_ATTR_IRK    13
+#define AAR_ATTR_OUTPUT 11
 
 /*
  * AAR output status — resolved IRK index written here by the output job list.
@@ -258,9 +259,9 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
     g_ccm_mlen = mdata_in_len;
 
     /*
-     * Pre-mask the ADATA (header) byte with the BLE header mask (0xE3)
-     * to zero out NESN/SN/MD bits before authentication.  This matches
-     * what the peer does when encrypting.  The CCM ADATAMASK register
+     * BLE Data Channel PDU header mask (0xE3) zeroes NESN, SN, MD bits
+     * for CCM authentication.  These bits change hop-to-hop and must not
+     * be included in the MIC calculation.  The CCM ADATAMASK register
      * should do this automatically (reset value 0xE3), but we pre-mask
      * here to be safe — double-masking is idempotent.
      */
@@ -536,7 +537,7 @@ phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
     /* Output job list stores the first resolved IRK index as a 2-byte value. */
     g_nrf_aar_out_status = UINT16_MAX;
     g_aar_out_jl[0].ptr = (uint8_t *)&g_nrf_aar_out_status;
-    g_aar_out_jl[0].attr_and_length = (11 << 24) | sizeof(g_nrf_aar_out_status);
+    g_aar_out_jl[0].attr_and_length = (AAR_ATTR_OUTPUT << 24) | sizeof(g_nrf_aar_out_status);
     g_aar_out_jl[1].ptr = NULL;
     g_aar_out_jl[1].attr_and_length = 0;
 
