@@ -742,9 +742,6 @@ phy_txpower_set(int8_t dbm)
     case -20:
         val = RADIO_TXPOWER_TXPOWER_Neg20dBm;
         break;
-    case -22:
-        val = RADIO_TXPOWER_TXPOWER_Neg22dBm;
-        break;
     case -28:
         val = RADIO_TXPOWER_TXPOWER_Neg28dBm;
         break;
@@ -790,10 +787,6 @@ phy_txpower_round(int8_t dbm)
 
     if (dbm >= (int8_t)-20) {
         return (int8_t)-20;
-    }
-
-    if (dbm >= (int8_t)-22) {
-        return (int8_t)-22;
     }
 
     if (dbm >= (int8_t)-28) {
