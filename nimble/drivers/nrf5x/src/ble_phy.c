@@ -1229,7 +1229,12 @@ ble_phy_rx_end_isr(void)
                 STATS_INC(ble_phy_stats, rx_hw_err);
                 ble_hdr->rxinfo.flags &= ~BLE_MBUF_HDR_F_CRC_OK;
             }
+#if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) ||                                \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) ||                                \
+    MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
         rx_encrypt_done:
+            (void)0; /* empty statement after label */
+#endif
         }
 #endif
     }
