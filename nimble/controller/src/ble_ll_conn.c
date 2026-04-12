@@ -934,6 +934,10 @@ ble_ll_conn_txend_encrypt(void *arg)
 
     connsm = (struct ble_ll_conn_sm *)arg;
     connsm->flags.encrypted = 1;
+    { extern volatile uint8_t g_enc_dbg_rx_enc_cb;
+      extern volatile int g_enc_dbg_step;
+      g_enc_dbg_rx_enc_cb = 1;
+      g_enc_dbg_step = 8; }
     ble_ll_conn_current_sm_over(connsm);
 }
 
@@ -957,6 +961,10 @@ ble_ll_conn_continue_rx_encrypt(void *arg)
     connsm = (struct ble_ll_conn_sm *)arg;
     ble_phy_encrypt_counter_set(connsm->enc_data.rx_pkt_cntr,
                                 !CONN_IS_CENTRAL(connsm));
+    { extern volatile uint8_t g_enc_dbg_rx_enc_cb;
+      extern volatile int g_enc_dbg_step;
+      g_enc_dbg_rx_enc_cb = 1;
+      g_enc_dbg_step = 8; }
 }
 #endif
 

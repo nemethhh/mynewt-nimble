@@ -26,6 +26,7 @@
 #include "sysinit/sysinit.h"
 #include "log/log.h"
 #include "host/ble_hs.h"
+#include "host/ble_gatt.h"
 #include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -33,6 +34,9 @@
 static uint8_t g_own_addr_type;
 static uint16_t conn_handle;
 static const char *device_name = "Mynewt";
+
+int gatt_svr_init(void);
+void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 
 volatile uint32_t g_app_dbg_evt_seq = 0;
 volatile uint32_t g_app_dbg_connect_count = 0;
@@ -267,6 +271,10 @@ mynewt_main(int argc, char **argv)
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.store_status_cb = debug_store_status_cb;
+    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
+
+    rc = gatt_svr_init();
+    assert(rc == 0);
 
     rc = ble_svc_gap_device_name_set(device_name);
     assert(rc == 0);

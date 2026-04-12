@@ -154,8 +154,8 @@ extern struct nrf_ccm_data *g_ccm_data_ptr; /* saved for deferred register setup
 
 /*
  * nRF54L KEY.VALUE byte order is reversed vs nRF52/nRF53.
- * KEY.VALUE[0] gets the last 4 bytes of the key (word-reversed + byte-swapped).
- * See datasheet Section 8.4.2.
+ * KEY.VALUE[0] gets the last 4 bytes of the key (word-reversed +
+ * byte-swapped). See datasheet Section 8.4.2.
  */
 static inline void
 phy_hw_ccm_set_key(const uint8_t *key)

@@ -40,7 +40,7 @@
 #include "phy_hw.h"
 
 /* Total number of resolving list elements */
-#define BLE_HW_RESOLV_LIST_SIZE     (16)
+#define BLE_HW_RESOLV_LIST_SIZE (16)
 
 /* We use this to keep track of which entries are set to valid addresses */
 static uint8_t g_ble_hw_whitelist_mask;
@@ -57,9 +57,9 @@ extern void tm_tick(void);
 
 /* The NRF51 supports up to 16 IRK entries */
 #if (MYNEWT_VAL(BLE_LL_RESOLV_LIST_SIZE) < 16)
-#define NRF_IRK_LIST_ENTRIES    (MYNEWT_VAL(BLE_LL_RESOLV_LIST_SIZE))
+#define NRF_IRK_LIST_ENTRIES (MYNEWT_VAL(BLE_LL_RESOLV_LIST_SIZE))
 #else
-#define NRF_IRK_LIST_ENTRIES    (16)
+#define NRF_IRK_LIST_ENTRIES (16)
 #endif
 
 /* NOTE: each entry is 16 bytes long. */
@@ -79,15 +79,15 @@ ble_hw_get_public_addr(ble_addr_t *addr)
 
 #if MYNEWT_VAL(BLE_PHY_UBLOX_BMD345_PUBLIC_ADDR)
     /*
-    * The BMD-345 modules are preprogrammed from the factory with a unique public
-    * The  Bluetooth device address stored in the CUSTOMER[0] and CUSTOMER[1]
-    * registers of the User Information Configuration Registers (UICR).
-    * The Bluetooth device address consists of the IEEE Organizationally Unique
-    * Identifier (OUI) combined with the hexadecimal digits that are printed on
-    * a 2D barcode and in human-readable text on the module label.The Bluetooth
-    * device address is stored in little endian format. The most significant
-    * bytes of the CUSTOMER[1] register are 0xFF to complete the 32-bit register.
-    */
+     * The BMD-345 modules are preprogrammed from the factory with a unique public
+     * The  Bluetooth device address stored in the CUSTOMER[0] and CUSTOMER[1]
+     * registers of the User Information Configuration Registers (UICR).
+     * The Bluetooth device address consists of the IEEE Organizationally Unique
+     * Identifier (OUI) combined with the hexadecimal digits that are printed on
+     * a 2D barcode and in human-readable text on the module label.The Bluetooth
+     * device address is stored in little endian format. The most significant
+     * bytes of the CUSTOMER[1] register are 0xFF to complete the 32-bit register.
+     */
 
     /* Copy into device address. We can do this because we know platform */
     addr_low = NRF_UICR->CUSTOMER[0];
@@ -525,7 +525,8 @@ ble_rng_isr(void)
     /* No callback? Clear and disable interrupts */
     if (g_ble_rng_isr_cb == NULL) {
         nrf_cracen_int_disable(NRF_CRACEN, NRF_CRACEN_INT_RNG_MASK);
-        NRF_CRACENCORE->RNGCONTROL.CONTROL &= ~CRACENCORE_RNGCONTROL_CONTROL_INTENFULL_Msk;
+        NRF_CRACENCORE->RNGCONTROL.CONTROL &=
+            ~CRACENCORE_RNGCONTROL_CONTROL_INTENFULL_Msk;
         NRF_CRACEN->EVENTS_RNG = 0;
         os_trace_isr_exit();
         return;
@@ -555,10 +556,10 @@ int
 ble_hw_rng_init(ble_rng_isr_cb_t cb, int bias)
 {
     NRF_CRACEN->ENABLE = CRACEN_ENABLE_CRYPTOMASTER_Msk |
-                         CRACEN_ENABLE_RNG_Msk |
-                         CRACEN_ENABLE_PKEIKG_Msk;
+                         CRACEN_ENABLE_RNG_Msk | CRACEN_ENABLE_PKEIKG_Msk;
 
-    while (NRF_CRACENCORE->PK.STATUS & CRACENCORE_PK_STATUS_PKBUSY_Msk);
+    while (NRF_CRACENCORE->PK.STATUS & CRACENCORE_PK_STATUS_PKBUSY_Msk)
+        ;
     NRF_CRACENCORE->PK.CONTROL &= ~CRACENCORE_IKG_PKECONTROL_CLEARIRQ_Msk;
 
     NRF_CRACENCORE->RNGCONTROL.CONTROL = CRACENCORE_RNGCONTROL_CONTROL_ResetValue |
@@ -590,7 +591,8 @@ ble_hw_rng_start(void)
 
     if (g_ble_rng_isr_cb) {
         nrf_cracen_int_enable(NRF_CRACEN, NRF_CRACEN_INT_RNG_MASK);
-        NRF_CRACENCORE->RNGCONTROL.CONTROL |= CRACENCORE_RNGCONTROL_CONTROL_INTENFULL_Msk;
+        NRF_CRACENCORE->RNGCONTROL.CONTROL |=
+            CRACENCORE_RNGCONTROL_CONTROL_INTENFULL_Msk;
         /* Force regeneration of the samples */
         NRF_CRACENCORE->RNGCONTROL.FIFOLEVEL = 0;
     }
@@ -632,10 +634,9 @@ ble_hw_rng_read(void)
 
     /* Wait for a sample */
     while (NRF_CRACENCORE->RNGCONTROL.FIFOLEVEL == 0) {
-        assert((NRF_CRACENCORE->RNGCONTROL.STATUS &
-                CRACENCORE_RNGCONTROL_STATUS_STATE_Msk) !=
-               (CRACENCORE_RNGCONTROL_STATUS_STATE_ERROR <<
-                CRACENCORE_RNGCONTROL_STATUS_STATE_Pos));
+        assert((NRF_CRACENCORE->RNGCONTROL.STATUS & CRACENCORE_RNGCONTROL_STATUS_STATE_Msk) !=
+               (CRACENCORE_RNGCONTROL_STATUS_STATE_ERROR
+                << CRACENCORE_RNGCONTROL_STATUS_STATE_Pos));
     }
 
     NRF_CRACEN->EVENTS_RNG = 0;
