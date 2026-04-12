@@ -42,9 +42,9 @@ struct sg_job_entry {
     uint32_t attr_and_length;
 };
 
-#define AAR_ATTR_HASH   11
-#define AAR_ATTR_PRAND  12
-#define AAR_ATTR_IRK    13
+#define AAR_ATTR_HASH  11
+#define AAR_ATTR_PRAND 12
+#define AAR_ATTR_IRK   13
 
 /*
  * AAR output status — resolved IRK index written here by the output job list.
@@ -55,11 +55,11 @@ extern uint16_t g_nrf_aar_out_status;
 extern uint8_t g_nrf_num_irks;
 
 #define NRF_TIMER0 NRF_TIMER10
-#define NRF_DPPIC NRF_DPPIC10
-#define NRF_RTC0 NRF_RTC10
-#define NRF_AAR NRF_AAR00
-#define NRF_CCM NRF_CCM00
-#define NRF_ECB NRF_ECB00
+#define NRF_DPPIC  NRF_DPPIC10
+#define NRF_RTC0   NRF_RTC10
+#define NRF_AAR    NRF_AAR00
+#define NRF_CCM    NRF_CCM00
+#define NRF_ECB    NRF_ECB00
 #define NRF_GPIOTE NRF_GPIOTE20
 
 #if MYNEWT_VAL(OS_CPUTIME_TIMER_NUM) == 0
@@ -76,25 +76,21 @@ extern uint8_t g_nrf_num_irks;
 #error Unsupported OS_CPUTIME_TIMER_NUM for nRF54L PHY
 #endif
 
-#define RADIO_IRQn RADIO_0_IRQn
-#define RADIO_INTENSET_ADDRESS_Msk RADIO_INTENSET00_ADDRESS_Msk
-#define RADIO_INTENCLR_ADDRESS_Msk RADIO_INTENCLR00_ADDRESS_Msk
+#define RADIO_IRQn                  RADIO_0_IRQn
+#define RADIO_INTENSET_ADDRESS_Msk  RADIO_INTENSET00_ADDRESS_Msk
+#define RADIO_INTENCLR_ADDRESS_Msk  RADIO_INTENCLR00_ADDRESS_Msk
 #define RADIO_INTENSET_DISABLED_Msk RADIO_INTENSET00_DISABLED_Msk
 #define RADIO_INTENCLR_DISABLED_Msk RADIO_INTENCLR00_DISABLED_Msk
 
 #define NRF_RADIO_INTENSET NRF_RADIO->INTENSET00
 
 /* To disable all radio interrupts */
-#define NRF_RADIO_IRQ_MASK_ALL  (RADIO_INTENSET00_READY_Msk    | \
-                                 RADIO_INTENSET00_ADDRESS_Msk  | \
-                                 RADIO_INTENSET00_PAYLOAD_Msk  | \
-                                 RADIO_INTENSET00_PHYEND_Msk   | \
-                                 RADIO_INTENSET00_DISABLED_Msk | \
-                                 RADIO_INTENSET00_DEVMATCH_Msk | \
-                                 RADIO_INTENSET00_DEVMISS_Msk  | \
-                                 RADIO_INTENSET00_BCMATCH_Msk  | \
-                                 RADIO_INTENSET00_CRCOK_Msk    | \
-                                 RADIO_INTENSET00_CRCERROR_Msk)
+#define NRF_RADIO_IRQ_MASK_ALL                                                \
+    (RADIO_INTENSET00_READY_Msk | RADIO_INTENSET00_ADDRESS_Msk |              \
+     RADIO_INTENSET00_PAYLOAD_Msk | RADIO_INTENSET00_PHYEND_Msk |             \
+     RADIO_INTENSET00_DISABLED_Msk | RADIO_INTENSET00_DEVMATCH_Msk |          \
+     RADIO_INTENSET00_DEVMISS_Msk | RADIO_INTENSET00_BCMATCH_Msk |            \
+     RADIO_INTENSET00_CRCOK_Msk | RADIO_INTENSET00_CRCERROR_Msk)
 
 /*
  * nRF54L AAR has no STATUS register for the resolved IRK index.
@@ -126,13 +122,13 @@ phy_hw_aar_resolv_disable(void)
 #define CCM_MODE_DATARATE_125Kbps CCM_MODE_DATARATE_125Kbit
 #define CCM_MODE_DATARATE_500Kbps CCM_MODE_DATARATE_500Kbit
 
-#define NRF_CCM_STATUS NRF_CCM->MACSTATUS
+#define NRF_CCM_STATUS     NRF_CCM->MACSTATUS
 #define NRF_CCM_EVENTS_END NRF_CCM->EVENTS_END
 
-#define CCM_ATTR_ALEN   11
-#define CCM_ATTR_MLEN   12
-#define CCM_ATTR_ADATA  13
-#define CCM_ATTR_MDATA  14
+#define CCM_ATTR_ALEN  11
+#define CCM_ATTR_MLEN  12
+#define CCM_ATTR_ADATA 13
+#define CCM_ATTR_MDATA 14
 
 uint32_t ble_phy_get_ccm_datarate(void);
 
@@ -154,36 +150,36 @@ extern uint16_t g_ccm_out_mlen;
 extern uint8_t *g_ccm_in_ptr;
 extern uint8_t *g_ccm_out_ptr;
 extern uint8_t g_ccm_decrypt;
-extern struct nrf_ccm_data *g_ccm_data_ptr;  /* saved for deferred register setup */
-extern volatile uint8_t  g_phy_tx_nonce8;       /* actual nonce[8] written to CCM for TX */
-extern volatile uint8_t  g_phy_tx_enc_captured; /* 1 = first TX packet captures frozen */
-extern volatile uint32_t g_phy_tx_enc_key[4];   /* KEY.VALUE as written for first TX pkt */
+extern struct nrf_ccm_data *g_ccm_data_ptr; /* saved for deferred register setup */
+extern volatile uint8_t g_phy_tx_nonce8; /* actual nonce[8] written to CCM for TX */
+extern volatile uint8_t g_phy_tx_enc_captured; /* 1 = first TX packet captures frozen */
+extern volatile uint32_t g_phy_tx_enc_key[4]; /* KEY.VALUE as written for first TX pkt */
 extern volatile uint32_t g_phy_tx_enc_nonce[4]; /* NONCE.VALUE words for first TX pkt */
-extern volatile uint8_t  g_phy_tx_enc_iv_bytes[8]; /* raw iv bytes for first TX pkt */
+extern volatile uint8_t g_phy_tx_enc_iv_bytes[8]; /* raw iv bytes for first TX pkt */
 
 /* P0 MIC debug: capture KEY/NONCE/counter values (write-only registers) */
 extern volatile uint32_t g_phy_rx_enc_nonce[4];
 extern volatile uint32_t g_phy_rx_enc_key[4];
 extern volatile uint64_t g_phy_rx_enc_pkt_counter;
-extern volatile uint8_t  g_phy_rx_enc_dir_bit;
-extern volatile uint8_t  g_phy_rx_enc_iv[8];
-extern volatile uint8_t  g_phy_rx_enc_in[8];
+extern volatile uint8_t g_phy_rx_enc_dir_bit;
+extern volatile uint8_t g_phy_rx_enc_iv[8];
+extern volatile uint8_t g_phy_rx_enc_in[8];
 extern volatile uint32_t g_phy_rx_enc_mode;
 extern volatile uint32_t g_phy_rx_enc_enable;
-extern volatile uint8_t  g_phy_rx_enc_captured;
-extern volatile uint8_t  g_phy_rx_enc_in_at_start[8];
+extern volatile uint8_t g_phy_rx_enc_captured;
+extern volatile uint8_t g_phy_rx_enc_in_at_start[8];
 extern volatile uint32_t g_phy_rx_enc_radio_state;
 /* Job list state at START time (before TX path overwrites) */
 extern volatile uint16_t g_phy_rx_enc_alen_at_start;
 extern volatile uint16_t g_phy_rx_enc_mlen_at_start;
 extern volatile uint32_t g_phy_rx_enc_mdata_attr_at_start;
 extern volatile uint32_t g_phy_rx_enc_mdata_ptr_at_start;
-extern volatile uint8_t  g_phy_rx_enc_adata_at_start;
+extern volatile uint8_t g_phy_rx_enc_adata_at_start;
 extern volatile uint32_t g_phy_rx_enc_adatamask_at_start;
 extern volatile uint32_t g_phy_rx_enc_subscribe_start;
 /* Live replay test: re-decrypt same data immediately after first MIC failure */
 extern volatile uint32_t g_phy_rx_enc_replay_macstatus;
-extern volatile uint8_t  g_phy_rx_enc_replay_pt;
+extern volatile uint8_t g_phy_rx_enc_replay_pt;
 extern volatile uint32_t g_phy_rx_enc_replay_errorstatus;
 
 /*
@@ -274,12 +270,11 @@ phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
      * working upstream drivers use the controller-provided value directly, so
      * do not apply any nRF54L-specific inversion here.
      */
-    nonce[8] = (ccm_data->dir_bit & 1) << 7 |
-               ((ccm_data->pkt_counter >> 32) & 0x7F);
+    nonce[8] = (ccm_data->dir_bit & 1) << 7 | ((ccm_data->pkt_counter >> 32) & 0x7F);
     if (!g_ccm_decrypt) {
         g_phy_tx_nonce8 = nonce[8];
     }
-    nonce[9]  = (ccm_data->pkt_counter >> 24) & 0xFF;
+    nonce[9] = (ccm_data->pkt_counter >> 24) & 0xFF;
     nonce[10] = (ccm_data->pkt_counter >> 16) & 0xFF;
     nonce[11] = (ccm_data->pkt_counter >> 8) & 0xFF;
     nonce[12] = ccm_data->pkt_counter & 0xFF;
@@ -323,8 +318,8 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
     uint16_t mdata_out_len;
 
     if (decrypt) {
-        mdata_in_len = payload_len + 4;  /* ciphertext + MIC */
-        mdata_out_len = payload_len;     /* plaintext only */
+        mdata_in_len = payload_len + 4; /* ciphertext + MIC */
+        mdata_out_len = payload_len;    /* plaintext only */
     } else {
         mdata_in_len = payload_len;      /* plaintext only */
         mdata_out_len = payload_len + 4; /* ciphertext + MIC */
@@ -351,9 +346,9 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
     g_ccm_in_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
     g_ccm_in_jl[1].ptr = (uint8_t *)&g_ccm_mlen;
     g_ccm_in_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
-    g_ccm_in_jl[2].ptr = &g_ccm_adata_in;  /* pre-masked S0 byte */
+    g_ccm_in_jl[2].ptr = &g_ccm_adata_in; /* pre-masked S0 byte */
     g_ccm_in_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
-    g_ccm_in_jl[3].ptr = in_buf + 3;   /* payload after S0/LEN/S1 */
+    g_ccm_in_jl[3].ptr = in_buf + 3; /* payload after S0/LEN/S1 */
     g_ccm_in_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_in_len;
     g_ccm_in_jl[4].ptr = NULL;
     g_ccm_in_jl[4].attr_and_length = 0;
@@ -385,39 +380,10 @@ phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
     NRF_CCM->OUT.PTR = (uint32_t)g_ccm_out_jl;
 }
 
-void ccm_selftest(void);
-
-extern volatile uint32_t g_ccm_test_enc_macstatus;
-extern volatile uint32_t g_ccm_test_enc_errorstatus;
-extern volatile uint32_t g_ccm_test_dec_macstatus;
-extern volatile uint32_t g_ccm_test_dec_errorstatus;
-extern volatile uint8_t  g_ccm_test_dec_plaintext;
-extern volatile uint8_t  g_ccm_test_ct[5];
-extern volatile uint32_t g_ccm_test_ran;
-
-/* Cold-decrypt test: decrypt without prior encrypt (tests CCM cold start) */
-extern volatile uint32_t g_ccm_cold_dec_macstatus;
-extern volatile uint32_t g_ccm_cold_dec_errorstatus;
-extern volatile uint8_t  g_ccm_cold_dec_plaintext;
-/* Global-jl test: decrypt using global job lists (tests stack vs global) */
-extern volatile uint32_t g_ccm_glob_dec_macstatus;
-extern volatile uint8_t  g_ccm_glob_dec_plaintext;
-/* Post-ECB test: decrypt after ECB with different key (tests H_new4) */
-extern volatile uint32_t g_ccm_ecb_dec_macstatus;
-extern volatile uint8_t  g_ccm_ecb_dec_plaintext;
-extern volatile uint32_t g_ccm_ecb_dec_errorstatus;
-/* Non-zero IV self-test — catches nonce byte-order bugs */
-extern volatile uint8_t  g_ccm_iv_test_ct[5];
-extern volatile uint32_t g_ccm_iv_test_enc_mac;
-extern volatile uint32_t g_ccm_iv_test_dec_mac;
-extern volatile uint8_t  g_ccm_iv_test_dec_pt;
-extern volatile uint32_t g_ccm_iv_test_enc_err;
-extern volatile uint32_t g_ccm_iv_test_dec_err;
-
 static inline void
 phy_hw_ccm_init(void)
 {
-    ccm_selftest();
+    /* CCM initialization is a no-op; hardware is configured per-packet */
 }
 
 static inline void
@@ -459,8 +425,8 @@ phy_hw_timer_start_trigger_disable(void)
 }
 
 static inline void
-phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr,
-                    uint8_t *scratch_ptr, struct nrf_ccm_data *ccm_data)
+phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr, uint8_t *scratch_ptr,
+                    struct nrf_ccm_data *ccm_data)
 {
     g_ccm_in_ptr = in_ptr;
     g_ccm_out_ptr = out_ptr;
@@ -483,8 +449,8 @@ phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr,
 }
 
 static inline void
-phy_hw_ccm_setup_rx(uint8_t *in_ptr, uint8_t *out_ptr,
-                    uint8_t *scratch_ptr, struct nrf_ccm_data *ccm_data)
+phy_hw_ccm_setup_rx(uint8_t *in_ptr, uint8_t *out_ptr, uint8_t *scratch_ptr,
+                    struct nrf_ccm_data *ccm_data)
 {
     g_ccm_in_ptr = in_ptr;
     g_ccm_out_ptr = out_ptr;
@@ -511,11 +477,10 @@ phy_hw_ccm_start(void)
     /* TX: build job lists now (payload is filled) and start encryption.
      * Set output header — CCM MLEN/ADATA outputs go to dummies, so the
      * RADIO-visible S0/LENGTH/S1 must be set explicitly here. */
-    phy_hw_ccm_build_ble_job_lists(g_ccm_in_ptr, g_ccm_out_ptr,
-                                   g_ccm_in_ptr[1], 0);
-    g_ccm_out_ptr[0] = g_ccm_in_ptr[0];       /* S0 (header byte) */
-    g_ccm_out_ptr[1] = g_ccm_in_ptr[1] + 4;   /* LENGTH = plaintext + MIC */
-    g_ccm_out_ptr[2] = 0;                      /* S1 */
+    phy_hw_ccm_build_ble_job_lists(g_ccm_in_ptr, g_ccm_out_ptr, g_ccm_in_ptr[1], 0);
+    g_ccm_out_ptr[0] = g_ccm_in_ptr[0];     /* S0 (header byte) */
+    g_ccm_out_ptr[1] = g_ccm_in_ptr[1] + 4; /* LENGTH = plaintext + MIC */
+    g_ccm_out_ptr[2] = 0;                   /* S1 */
     __DSB();
     nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
 }
@@ -581,8 +546,7 @@ phy_hw_ccm_post_rx_decrypt(uint8_t *enc_buf, uint8_t *out_buf)
         g_phy_rx_enc_mdata_ptr_at_start = (uint32_t)g_ccm_in_jl[3].ptr;
         g_phy_rx_enc_adata_at_start = g_ccm_adata_in;
         /* ADATAMASK and SUBSCRIBE_START registers */
-        g_phy_rx_enc_adatamask_at_start =
-            *(volatile uint32_t *)0x50046548;
+        g_phy_rx_enc_adatamask_at_start = *(volatile uint32_t *)0x50046548;
         g_phy_rx_enc_subscribe_start = NRF_CCM->SUBSCRIBE_START;
         g_phy_rx_enc_captured = 1;
     }
@@ -592,8 +556,8 @@ phy_hw_ccm_post_rx_decrypt(uint8_t *enc_buf, uint8_t *out_buf)
 static inline void
 phy_hw_radio_fast_ru_setup(void)
 {
-    NRF_RADIO->TIMING = (RADIO_TIMING_RU_Fast << RADIO_TIMING_RU_Pos) &
-                        RADIO_TIMING_RU_Msk;
+    NRF_RADIO->TIMING =
+        (RADIO_TIMING_RU_Fast << RADIO_TIMING_RU_Pos) & RADIO_TIMING_RU_Msk;
 }
 
 static inline void
@@ -608,18 +572,16 @@ phy_hw_radio_events_clear(void)
 static inline void
 phy_hw_radio_shorts_setup_tx(void)
 {
-    NRF_RADIO->SHORTS = RADIO_SHORTS_PHYEND_DISABLE_Msk |
-                        RADIO_SHORTS_READY_START_Msk;
+    NRF_RADIO->SHORTS = RADIO_SHORTS_PHYEND_DISABLE_Msk | RADIO_SHORTS_READY_START_Msk;
 }
 
 static inline void
 phy_hw_radio_shorts_setup_rx(void)
 {
     /* nRF54L RADIO has no DISABLED_RSSISTOP shortcut */
-    NRF_RADIO->SHORTS = RADIO_SHORTS_PHYEND_DISABLE_Msk |
-                        RADIO_SHORTS_READY_START_Msk |
-                        RADIO_SHORTS_ADDRESS_BCSTART_Msk |
-                        RADIO_SHORTS_ADDRESS_RSSISTART_Msk;
+    NRF_RADIO->SHORTS =
+        RADIO_SHORTS_PHYEND_DISABLE_Msk | RADIO_SHORTS_READY_START_Msk |
+        RADIO_SHORTS_ADDRESS_BCSTART_Msk | RADIO_SHORTS_ADDRESS_RSSISTART_Msk;
 }
 
 static inline void
