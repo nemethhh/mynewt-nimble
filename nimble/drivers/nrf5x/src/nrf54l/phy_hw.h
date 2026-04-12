@@ -57,7 +57,6 @@ extern uint8_t g_nrf_num_irks;
 
 #define NRF_TIMER0 NRF_TIMER10
 #define NRF_DPPIC  NRF_DPPIC10
-#define NRF_RTC0   NRF_RTC10
 #define NRF_AAR    NRF_AAR00
 #define NRF_CCM    NRF_CCM00
 #define NRF_ECB    NRF_ECB00

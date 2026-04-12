@@ -25,7 +25,6 @@
 #include <hal/nrf_ccm.h>
 #include <hal/nrf_aar.h>
 #include <hal/nrf_timer.h>
-#include <hal/nrf_rtc.h>
 #include "syscfg/syscfg.h"
 #include "os/os.h"
 /* Keep os_cputime explicitly to enable build on non-Mynewt platforms */
