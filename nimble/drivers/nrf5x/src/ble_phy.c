@@ -181,55 +181,6 @@ static uint32_t g_ble_phy_rx_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
 static uint32_t g_ble_phy_enc_buf[(BLE_PHY_MAX_PDU_LEN + 3) / 4];
 #endif
 
-/* Encryption RX debug diagnostics (non-intrusive, read via GDB post-mortem) */
-volatile uint32_t g_phy_rx_isr_count = 0;     /* total RX end ISR calls */
-volatile uint32_t g_phy_rx_crcok_count = 0;   /* CRC OK packets */
-volatile uint32_t g_phy_rx_crcfail_count = 0; /* CRC fail packets */
-volatile uint32_t g_phy_rx_enc_enter = 0;     /* entered encrypted RX path */
-volatile uint32_t g_phy_rx_enc_decrypt = 0;   /* called post_rx_decrypt */
-volatile uint32_t g_phy_rx_enc_ccm_end = 0;   /* CCM EVENTS_END seen */
-volatile uint32_t g_phy_rx_enc_ccm_err = 0;   /* CCM EVENTS_ERROR */
-volatile uint32_t g_phy_rx_enc_mic_fail = 0;  /* MIC failure */
-volatile uint32_t g_phy_rx_enc_mic_ok = 0;    /* MIC pass */
-volatile uint8_t g_phy_rx_enc_last_hdr = 0;   /* last encrypted pkt header */
-volatile uint8_t g_phy_rx_enc_last_len = 0;   /* last encrypted pkt length */
-volatile uint32_t g_phy_rx_ccm_macstatus = 0; /* last CCM MACSTATUS */
-volatile uint8_t g_phy_rx_enc_ccm_adata = 0; /* last CCM ADATA output (may be masked) */
-volatile uint8_t g_phy_rx_enc_out0 = 0; /* out_buf[0] after CCM (S0 / header) */
-volatile uint8_t g_phy_rx_enc_out1 = 0; /* out_buf[1] after CCM (MLEN low) */
-volatile uint8_t g_phy_rx_enc_out2 = 0; /* out_buf[2] after CCM (MLEN high) */
-volatile uint8_t g_phy_rx_enc_out3 = 0; /* out_buf[3] after CCM (first payload) */
-volatile uint32_t g_phy_rx_enc_nonzero_len =
-    0; /* packets where dptr[1] != 0 after CCM */
-volatile uint32_t g_phy_rx_enc_dup_drop = 0; /* packets dropped by SN dup check */
-volatile uint32_t g_phy_rx_enc_empty_passthrough =
-    0; /* zero-length encrypted RX packets bypassed */
-volatile uint32_t g_phy_txend_isr_count = 0; /* TX end ISR calls */
-volatile uint32_t g_phy_tx_enc_enter = 0;    /* entered encrypted TX path */
-volatile uint32_t g_phy_tx_enc_wait_end = 0; /* waited for CCM END before TX */
-volatile uint32_t g_phy_tx_enc_ccm_end = 0;  /* CCM EVENTS_END seen on TX */
-volatile uint32_t g_phy_tx_enc_ccm_err = 0;  /* CCM EVENTS_ERROR seen on TX */
-volatile uint32_t g_phy_tx_enc_macstatus = 0; /* last CCM MACSTATUS after TX */
-volatile uint32_t g_phy_tx_enc_errorstatus = 0; /* last CCM ERRORSTATUS after TX */
-volatile uint64_t g_phy_tx_enc_pkt_counter =
-    0; /* tx pkt counter programmed into CCM */
-volatile uint8_t g_phy_tx_enc_dir_bit = 0; /* tx direction bit programmed into CCM */
-volatile uint8_t g_phy_tx_enc_in0 = 0;  /* plaintext S0 before CCM */
-volatile uint8_t g_phy_tx_enc_in1 = 0;  /* plaintext LENGTH before CCM */
-volatile uint8_t g_phy_tx_enc_in2 = 0;  /* plaintext S1 before CCM */
-volatile uint8_t g_phy_tx_enc_in3 = 0;  /* first plaintext payload byte */
-volatile uint8_t g_phy_tx_enc_out0 = 0; /* TX S0 after CCM */
-volatile uint8_t g_phy_tx_enc_out1 = 0; /* TX LENGTH after CCM */
-volatile uint8_t g_phy_tx_enc_out2 = 0; /* TX S1 after CCM */
-volatile uint8_t g_phy_tx_enc_out3 = 0; /* first ciphertext byte */
-volatile uint8_t g_phy_tx_enc_pkt_captured = 0; /* 1 = first TX packet bytes frozen */
-volatile uint8_t g_phy_tx_enc_first_in[20]; /* first TX plaintext packet bytes */
-volatile uint8_t g_phy_tx_enc_first_out[24]; /* first TX ciphertext packet bytes */
-volatile uint8_t g_phy_tx_enc_first_in_len = 0;
-volatile uint8_t g_phy_tx_enc_first_out_len = 0;
-volatile uint32_t g_phy_tx_enc_sw_empty =
-    0; /* empty encrypted TX PDUs built in software */
-
 /* RF center frequency for each channel index (offset from 2400 MHz) */
 static const uint8_t g_ble_phy_chan_freq[BLE_PHY_NUM_CHANS] = {
     4,  6,  8,  10, 12, 14, 16, 18, 20, 22, /* 0-9 */
@@ -1225,40 +1176,25 @@ ble_phy_rx_end_isr(void)
 
     /* Count PHY crc errors and valid packets */
     crcok = NRF_RADIO->EVENTS_CRCOK;
-    g_phy_rx_isr_count++;
     if (!crcok) {
         STATS_INC(ble_phy_stats, rx_crc_err);
-        g_phy_rx_crcfail_count++;
     } else {
         STATS_INC(ble_phy_stats, rx_valid);
-        g_phy_rx_crcok_count++;
         ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_CRC_OK;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION)
         if (g_ble_phy_data.phy_encrypted) {
-            g_phy_rx_enc_enter++;
-            g_phy_rx_enc_last_hdr = ((uint8_t *)&g_ble_phy_enc_buf[0])[0];
-            g_phy_rx_enc_last_len = ((uint8_t *)&g_ble_phy_enc_buf[0])[1];
+            uint8_t enc_len = ((uint8_t *)&g_ble_phy_enc_buf[0])[1];
 #if MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L15) ||                                \
     MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L10) ||                                \
     MYNEWT_VAL_CHOICE(MCU_TARGET, nRF54L05)
             /* nRF54L: no on-the-fly decrypt; trigger post-receive
              * FastDecryption from enc_buf into dptr (rx_buf + 3). */
-            g_phy_rx_enc_decrypt++;
-            if (g_phy_rx_enc_last_len == 0) {
+            if (enc_len == 0) {
                 uint8_t *encp = (uint8_t *)&g_ble_phy_enc_buf[0];
 
-                g_phy_rx_enc_empty_passthrough++;
-                g_phy_rx_enc_ccm_end++;
-                g_phy_rx_ccm_macstatus = 1;
                 dptr[0] = encp[0];
                 dptr[1] = 0;
                 dptr[2] = encp[2];
-                g_phy_rx_enc_ccm_adata = encp[0] & BLE_LL_PDU_HEADERMASK_DATA;
-                g_phy_rx_enc_out0 = dptr[0];
-                g_phy_rx_enc_out1 = dptr[1];
-                g_phy_rx_enc_out2 = dptr[2];
-                g_phy_rx_enc_out3 = 0;
-                g_phy_rx_enc_mic_ok++;
                 goto rx_encrypt_done;
             }
             phy_hw_ccm_post_rx_decrypt((uint8_t *)&g_ble_phy_enc_buf[0], dptr);
@@ -1266,8 +1202,6 @@ ble_phy_rx_end_isr(void)
             while (NRF_CCM_EVENTS_END == 0) {
                 /* Make sure CCM finished */
             };
-            g_phy_rx_enc_ccm_end++;
-            g_phy_rx_ccm_macstatus = NRF_CCM_STATUS;
 
             /*
              * On nRF54L FastDecryption, the CCM still mutates the BLE metadata
@@ -1277,27 +1211,12 @@ ble_phy_rx_end_isr(void)
              * original header and the plaintext payload length.
              */
             dptr[0] = ((uint8_t *)&g_ble_phy_enc_buf[0])[0];
-            dptr[1] = (g_phy_rx_enc_last_len >= 4) ? (g_phy_rx_enc_last_len - 4) : 0;
+            dptr[1] = (enc_len >= 4) ? (enc_len - 4) : 0;
             dptr[2] = ((uint8_t *)&g_ble_phy_enc_buf[0])[2];
-            {
-                extern uint8_t g_ccm_out_adata;
-                g_phy_rx_enc_ccm_adata = g_ccm_out_adata;
-            }
-            /* Capture output buffer after CCM, before S1 elimination */
-            g_phy_rx_enc_out0 = dptr[0];
-            g_phy_rx_enc_out1 = dptr[1];
-            g_phy_rx_enc_out2 = dptr[2];
-            g_phy_rx_enc_out3 = dptr[3];
-            if (dptr[1] != 0) {
-                g_phy_rx_enc_nonzero_len++;
-            }
 
             /* Only set MIC failure flag if frame is not zero length */
             if ((dptr[1] != 0) && (NRF_CCM_STATUS == 0)) {
                 ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_MIC_FAILURE;
-                g_phy_rx_enc_mic_fail++;
-            } else {
-                g_phy_rx_enc_mic_ok++;
             }
 
             /*
@@ -1309,7 +1228,6 @@ ble_phy_rx_end_isr(void)
             if (NRF_CCM->EVENTS_ERROR) {
                 STATS_INC(ble_phy_stats, rx_hw_err);
                 ble_hdr->rxinfo.flags &= ~BLE_MBUF_HDR_F_CRC_OK;
-                g_phy_rx_enc_ccm_err++;
             }
         rx_encrypt_done:
         }
@@ -2024,25 +1942,11 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
     /* Start key-stream generation and encryption (via short) */
     if (g_ble_phy_data.phy_encrypted) {
         used_sw_ccm = 0;
-        g_phy_tx_enc_enter++;
-        g_phy_tx_enc_pkt_counter = g_nrf_ccm_data.pkt_counter;
-        g_phy_tx_enc_dir_bit = g_nrf_ccm_data.dir_bit;
-        g_phy_tx_enc_in0 = dptr[0];
-        g_phy_tx_enc_in1 = dptr[1];
-        g_phy_tx_enc_in2 = dptr[2];
-        g_phy_tx_enc_in3 = payload_len ? dptr[3] : 0;
         if (payload_len == 0) {
             used_sw_ccm = 1;
-            g_phy_tx_enc_sw_empty++;
-            g_phy_tx_enc_macstatus = 1;
-            g_phy_tx_enc_errorstatus = 0;
             pktptr[0] = hdr_byte;
             pktptr[1] = 0;
             pktptr[2] = 0;
-            g_phy_tx_enc_out0 = pktptr[0];
-            g_phy_tx_enc_out1 = pktptr[1];
-            g_phy_tx_enc_out2 = pktptr[2];
-            g_phy_tx_enc_out3 = 0;
         }
 #if PHY_USE_HEADERMASK_WORKAROUND
         if (!used_sw_ccm && g_ble_phy_data.phy_headermask != BLE_LL_PDU_HEADERMASK_DATA) {
@@ -2062,45 +1966,11 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
              * DMA can fetch it, otherwise larger encrypted L2CAP/SMP PDUs can
              * be transmitted partially encrypted or stale.
              */
-            g_phy_tx_enc_wait_end++;
             while ((NRF_CCM_EVENTS_END == 0) && (NRF_CCM->EVENTS_ERROR == 0)) {
 #if BABBLESIM
                 tm_tick();
 #endif
             }
-
-            if (NRF_CCM_EVENTS_END) {
-                g_phy_tx_enc_ccm_end++;
-            }
-            if (NRF_CCM->EVENTS_ERROR) {
-                g_phy_tx_enc_ccm_err++;
-            }
-
-            g_phy_tx_enc_macstatus = NRF_CCM_STATUS;
-            g_phy_tx_enc_errorstatus = NRF_CCM->ERRORSTATUS;
-            g_phy_tx_enc_out0 = pktptr[0];
-            g_phy_tx_enc_out1 = pktptr[1];
-            g_phy_tx_enc_out2 = pktptr[2];
-            g_phy_tx_enc_out3 = pktptr[3];
-        }
-        if (!g_phy_tx_enc_pkt_captured) {
-            uint8_t tx_in_len;
-            uint8_t tx_out_len;
-
-            tx_in_len = dptr[1] + 3;
-            tx_out_len = pktptr[1] + 3;
-            if (tx_in_len > sizeof(g_phy_tx_enc_first_in)) {
-                tx_in_len = sizeof(g_phy_tx_enc_first_in);
-            }
-            if (tx_out_len > sizeof(g_phy_tx_enc_first_out)) {
-                tx_out_len = sizeof(g_phy_tx_enc_first_out);
-            }
-
-            memcpy((void *)g_phy_tx_enc_first_in, dptr, tx_in_len);
-            memcpy((void *)g_phy_tx_enc_first_out, pktptr, tx_out_len);
-            g_phy_tx_enc_first_in_len = tx_in_len;
-            g_phy_tx_enc_first_out_len = tx_out_len;
-            g_phy_tx_enc_pkt_captured = 1;
         }
     }
 #endif

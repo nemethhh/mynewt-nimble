@@ -315,22 +315,12 @@ struct ecb_job_entry {
 static struct ecb_job_entry ecb_input_job_list[2];
 static struct ecb_job_entry ecb_output_job_list[2];
 
-/* Debug counters for ECB — readable via GDB */
-uint32_t g_ecb_call_cnt;
-uint32_t g_ecb_ok_cnt;
-uint32_t g_ecb_err_cnt;
-uint32_t g_ecb_ccm_enable_at_entry;
-
 int
 ble_hw_encrypt_block(struct ble_encryption_block *ecb)
 {
     int rc;
     uint32_t end;
     uint32_t err;
-
-    g_ecb_call_cnt++;
-    /* Capture shared ENABLE register state (CCM00 base + 0x500) */
-    g_ecb_ccm_enable_at_entry = *(volatile uint32_t *)0x50046500;
 
     /* Stop ECB */
     nrf_ecb_task_trigger(NRF_ECB, NRF_ECB_TASK_STOP);
@@ -370,9 +360,6 @@ ble_hw_encrypt_block(struct ble_encryption_block *ecb)
         if (end || err) {
             if (err) {
                 rc = -1;
-                g_ecb_err_cnt++;
-            } else {
-                g_ecb_ok_cnt++;
             }
             break;
         }
