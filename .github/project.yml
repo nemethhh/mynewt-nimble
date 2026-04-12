@@ -27,9 +27,10 @@ project.repositories:
 #
 repository.apache-mynewt-core:
     type: github
-    vers: 0.0.0
-    user: apache
+    vers: 0-dev
+    user: nemethhh
     repo: mynewt-core
+    branch: fix/nrf54l-syscfg-include
 
 project.repositories.ignored:
        - stm-*
