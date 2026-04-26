@@ -26,12 +26,16 @@
 #include "sysinit/sysinit.h"
 #include "log/log.h"
 #include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 
 static uint8_t g_own_addr_type;
 static uint16_t conn_handle;
-static const char *device_name = "Mynewt";
+
+int gatt_svr_init(void);
+void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 
 /* adv_event() calls advertise(), so forward declaration is required */
 static void advertise(void);
@@ -39,6 +43,9 @@ static void advertise(void);
 static int
 adv_event(struct ble_gap_event *event, void *arg)
 {
+    struct ble_gap_conn_desc desc;
+    int rc;
+
     switch (event->type) {
     case BLE_GAP_EVENT_ADV_COMPLETE:
         MODLOG_DFLT(INFO,"Advertising completed, termination code: %d\n",
@@ -46,11 +53,14 @@ adv_event(struct ble_gap_event *event, void *arg)
         advertise();
         break;
     case BLE_GAP_EVENT_CONNECT:
-        assert(event->connect.status == 0);
         MODLOG_DFLT(INFO, "connection %s; status=%d\n",
                     event->connect.status == 0 ? "established" : "failed",
                     event->connect.status);
-        conn_handle = event->connect.conn_handle;
+        if (event->connect.status == 0) {
+            conn_handle = event->connect.conn_handle;
+        } else {
+            advertise();
+        }
         break;
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
         /* connected device requests update of connection parameters,
@@ -70,6 +80,30 @@ adv_event(struct ble_gap_event *event, void *arg)
         /* Connection terminated; resume advertising */
         advertise();
         break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        MODLOG_DFLT(INFO, "encryption change; status=%d\n",
+                    event->enc_change.status);
+        break;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        struct ble_sm_io pkey = {0};
+        pkey.action = event->passkey.params.action;
+        if (pkey.action == BLE_SM_IOACT_NONE ||
+            pkey.action == BLE_SM_IOACT_NUMCMP) {
+            pkey.numcmp_accept = 1;
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        }
+        break;
+    }
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        assert(rc == 0);
+        rc = ble_store_util_delete_peer(&desc.peer_id_addr);
+        assert(rc == 0);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    case BLE_GAP_EVENT_PAIRING_COMPLETE:
+        MODLOG_DFLT(INFO, "pairing complete; status=%d\n",
+                    event->pairing_complete.status);
+        break;
     default:
         MODLOG_DFLT(ERROR, "Advertising event not handled,"
                     "event code: %u\n", event->type);
@@ -81,6 +115,7 @@ adv_event(struct ble_gap_event *event, void *arg)
 static void
 advertise(void)
 {
+    const char *name;
     int rc;
 
     /* set adv parameters */
@@ -108,8 +143,9 @@ advertise(void)
     fields.uuids128_is_complete = 0;
     fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
 
-    rsp_fields.name = (uint8_t *)device_name;
-    rsp_fields.name_len = strlen(device_name);
+    name = ble_svc_gap_device_name();
+    rsp_fields.name = (uint8_t *)name;
+    rsp_fields.name_len = strlen(name);
     rsp_fields.name_is_complete = 1;
 
     rc = ble_gap_adv_set_fields(&fields);
@@ -154,8 +190,10 @@ mynewt_main(int argc, char **argv)
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
 
-    rc = ble_svc_gap_device_name_set(device_name);
+    rc = gatt_svr_init();
     assert(rc == 0);
 
     /* As the last thing, process events from default event queue. */
