@@ -91,6 +91,12 @@ phy_hw_ccm_start(void)
 }
 
 static inline void
+phy_hw_ccm_tx_wait_complete(void)
+{
+    /* nRF52/53 encrypts on-the-fly via KSGEN->CRYPT; no pre-TX wait needed. */
+}
+
+static inline void
 phy_hw_radio_fast_ru_setup(void)
 {
     NRF_RADIO->MODECNF0 |= (RADIO_MODECNF0_RU_Fast << RADIO_MODECNF0_RU_Pos) &

@@ -2001,18 +2001,7 @@ ble_phy_tx(ble_phy_tx_pducb_t pducb, void *pducb_arg, uint8_t end_trans)
 #endif
         if (!used_sw_ccm) {
             phy_hw_ccm_start();
-
-            /*
-             * Unlike the nRF52 CCM flow, the nRF54L path builds the encrypted
-             * packet in RAM. Make sure the buffer is complete before the RADIO
-             * DMA can fetch it, otherwise larger encrypted L2CAP/SMP PDUs can
-             * be transmitted partially encrypted or stale.
-             */
-            while ((NRF_CCM_EVENTS_END == 0) && (NRF_CCM->EVENTS_ERROR == 0)) {
-#if BABBLESIM
-                tm_tick();
-#endif
-            }
+            phy_hw_ccm_tx_wait_complete();
         }
     }
 #endif

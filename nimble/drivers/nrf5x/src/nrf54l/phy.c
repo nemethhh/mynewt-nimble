@@ -119,6 +119,20 @@ phy_debug_init(void)
 }
 #endif /* PHY_USE_DEBUG */
 
+#if BABBLESIM
+extern void tm_tick(void);
+#endif
+
+void
+phy_hw_ccm_tx_wait_complete(void)
+{
+    while ((NRF_CCM_EVENTS_END == 0) && (NRF_CCM->EVENTS_ERROR == 0)) {
+#if BABBLESIM
+        tm_tick();
+#endif
+    }
+}
+
 void
 phy_ppi_init(void)
 {

@@ -311,6 +311,8 @@ phy_hw_ccm_init(void)
     /* CCM initialization is a no-op; hardware is configured per-packet */
 }
 
+void phy_hw_ccm_tx_wait_complete(void);
+
 static inline void
 phy_hw_timer_start_trigger_set(uint32_t cputime)
 {
