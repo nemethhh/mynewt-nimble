@@ -30,7 +30,7 @@
 /* AAR output status — resolved IRK index written by the nRF54L AAR output
  * job list.  The hardware writes exactly 2 bytes per resolved IRK; if the
  * job-list entry length exceeds that the EasyDMA silently drops the write. */
-uint16_t g_nrf_aar_out_status;
+static uint16_t g_nrf_aar_out_status;
 
 /* CCM scatter/gather job lists and state — private to this file */
 static struct sg_job_entry g_ccm_in_jl[5];
@@ -47,8 +47,8 @@ static uint8_t g_ccm_decrypt;
 static struct nrf_ccm_data *g_ccm_data_ptr;
 
 /* AAR scatter/gather job lists */
-struct sg_job_entry g_aar_in_jl[19];
-struct sg_job_entry g_aar_out_jl[2];
+static struct sg_job_entry g_aar_in_jl[19];
+static struct sg_job_entry g_aar_out_jl[2];
 
 /* Create PPIB links between RADIO and PERI power domain. */
 #define PPIB_RADIO_PERI(_ch, _src, _dst)                                      \
@@ -392,6 +392,62 @@ phy_hw_ccm_tx_wait_complete(void)
         tm_tick();
 #endif
     }
+}
+
+/*
+ * nRF54L AAR has no STATUS register for the resolved IRK index.
+ * The resolved index is written to the output job list buffer (2 bytes LE).
+ */
+uint32_t
+phy_hw_aar_get_resolved_index(void)
+{
+    if (NRF_AAR->OUT.AMOUNT >= sizeof(g_nrf_aar_out_status)) {
+        return g_nrf_aar_out_status;
+    }
+    return 0;
+}
+
+void
+phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
+{
+    int i;
+    int num_irks = g_nrf_num_irks;
+    struct sg_job_entry *entry;
+
+    /* IRK entries in the input job list define how many IRKs AAR scans. */
+    entry = &g_aar_in_jl[2];
+    for (i = 0; i < num_irks; i++) {
+        entry->ptr = (uint8_t *)&irk_ptr[i * 4];
+        entry->attr_and_length = (AAR_ATTR_IRK << 24) | 16;
+        entry++;
+    }
+    entry->ptr = NULL;
+    entry->attr_and_length = 0;
+
+    /* Output job list stores the first resolved IRK index as a 2-byte value. */
+    g_nrf_aar_out_status = UINT16_MAX;
+    g_aar_out_jl[0].ptr = (uint8_t *)&g_nrf_aar_out_status;
+    g_aar_out_jl[0].attr_and_length =
+        (AAR_ATTR_OUTPUT << 24) | sizeof(g_nrf_aar_out_status);
+    g_aar_out_jl[1].ptr = NULL;
+    g_aar_out_jl[1].attr_and_length = 0;
+
+    NRF_AAR->IN.PTR = (uint32_t)g_aar_in_jl;
+    NRF_AAR->OUT.PTR = (uint32_t)g_aar_out_jl;
+}
+
+void
+phy_hw_aar_addrptr_set(uint8_t *dptr)
+{
+    /*
+     * dptr points to start of device address (6 bytes):
+     *   bytes [0..2] = hash (3 bytes, LSB first)
+     *   bytes [3..5] = prand (3 bytes, LSB first)
+     */
+    g_aar_in_jl[0].ptr = dptr;
+    g_aar_in_jl[0].attr_and_length = (AAR_ATTR_HASH << 24) | 3;
+    g_aar_in_jl[1].ptr = dptr + 3;
+    g_aar_in_jl[1].attr_and_length = (AAR_ATTR_PRAND << 24) | 3;
 }
 
 void

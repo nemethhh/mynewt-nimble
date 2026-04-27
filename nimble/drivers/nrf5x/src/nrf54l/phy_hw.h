@@ -47,12 +47,6 @@ struct sg_job_entry {
 #define AAR_ATTR_IRK    13
 #define AAR_ATTR_OUTPUT 11
 
-/*
- * AAR output status — resolved IRK index written here by the output job list.
- * The nRF54L AAR EasyDMA writes exactly 2 bytes per resolved IRK; if the
- * job-list entry length exceeds 2 the write is silently dropped.
- */
-extern uint16_t g_nrf_aar_out_status;
 extern uint8_t g_nrf_num_irks;
 
 #define NRF_TIMER0 NRF_TIMER10
@@ -92,18 +86,8 @@ extern uint8_t g_nrf_num_irks;
      RADIO_INTENSET00_DEVMISS_Msk | RADIO_INTENSET00_BCMATCH_Msk |            \
      RADIO_INTENSET00_CRCOK_Msk | RADIO_INTENSET00_CRCERROR_Msk)
 
-/*
- * nRF54L AAR has no STATUS register for the resolved IRK index.
- * The resolved index is written to the output job list buffer (2 bytes LE).
- */
-static inline uint32_t
-phy_hw_aar_get_resolved_index(void)
-{
-    if (NRF_AAR->OUT.AMOUNT >= sizeof(g_nrf_aar_out_status)) {
-        return g_nrf_aar_out_status;
-    }
-    return 0;
-}
+/* Resolved IRK index from the last AAR run — state is private in nrf54l/phy.c */
+uint32_t phy_hw_aar_get_resolved_index(void);
 #define NRF_AAR_STATUS phy_hw_aar_get_resolved_index()
 
 static inline void
@@ -235,56 +219,8 @@ phy_hw_radio_timer_task_stop(void)
     nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_STOP);
 }
 
-/*
- * AAR scatter/gather job lists.
- * Input: [Hash][Prand][IRK0]...[IRKn][END] — max 19 entries (16 IRKs + 2 addr + 1 term)
- * Output: [resolved index buf][END] — 2 entries
- * Defined in nrf54l/phy.c.
- */
-extern struct sg_job_entry g_aar_in_jl[19];
-extern struct sg_job_entry g_aar_out_jl[2];
-
-static inline void
-phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr)
-{
-    int i;
-    int num_irks = g_nrf_num_irks;
-    struct sg_job_entry *entry;
-
-    /* IRK entries in the input job list define how many IRKs AAR scans. */
-    entry = &g_aar_in_jl[2];
-    for (i = 0; i < num_irks; i++) {
-        entry->ptr = (uint8_t *)&irk_ptr[i * 4];
-        entry->attr_and_length = (AAR_ATTR_IRK << 24) | 16;
-        entry++;
-    }
-    entry->ptr = NULL;
-    entry->attr_and_length = 0;
-
-    /* Output job list stores the first resolved IRK index as a 2-byte value. */
-    g_nrf_aar_out_status = UINT16_MAX;
-    g_aar_out_jl[0].ptr = (uint8_t *)&g_nrf_aar_out_status;
-    g_aar_out_jl[0].attr_and_length =
-        (AAR_ATTR_OUTPUT << 24) | sizeof(g_nrf_aar_out_status);
-    g_aar_out_jl[1].ptr = NULL;
-    g_aar_out_jl[1].attr_and_length = 0;
-
-    NRF_AAR->IN.PTR = (uint32_t)g_aar_in_jl;
-    NRF_AAR->OUT.PTR = (uint32_t)g_aar_out_jl;
-}
-
-static inline void
-phy_hw_aar_addrptr_set(uint8_t *dptr)
-{
-    /*
-     * dptr points to start of device address (6 bytes):
-     *   bytes [0..2] = hash (3 bytes, LSB first)
-     *   bytes [3..5] = prand (3 bytes, LSB first)
-     */
-    g_aar_in_jl[0].ptr = dptr;
-    g_aar_in_jl[0].attr_and_length = (AAR_ATTR_HASH << 24) | 3;
-    g_aar_in_jl[1].ptr = dptr + 3;
-    g_aar_in_jl[1].attr_and_length = (AAR_ATTR_PRAND << 24) | 3;
-}
+/* AAR functions — implemented in nrf54l/phy.c */
+void phy_hw_aar_irk_setup(uint32_t *irk_ptr, uint32_t *scratch_ptr);
+void phy_hw_aar_addrptr_set(uint8_t *dptr);
 
 #endif /* H_PHY_HW_ */
