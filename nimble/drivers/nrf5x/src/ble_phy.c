@@ -1435,8 +1435,14 @@ ble_phy_rx_start_isr(void)
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY)
     /*
-     * If privacy is enabled and received PDU has TxAdd bit set (i.e. random
-     * address) we try to resolve address using AAR.
+     * BCC is programmed to 8 bits and started at ADDRESS event via the
+     * ADDRESS_BCSTART short.  BCMATCH fires after exactly one PDU byte —
+     * S0 = dptr[0] — has been written to DMA.  Only dptr[0] is valid here;
+     * dptr[1..N] still hold stale data from the previous packet.
+     * Reading dptr[0] corrects a latent upstream nRF5x bug that read dptr[3].
+     *
+     * If privacy is enabled and TxAdd (bit 6 of S0) is set, the peer uses
+     * a random address and we try to resolve it using AAR.
      */
     if (g_ble_phy_data.phy_privacy && (dptr[0] & 0x40)) {
         /*
