@@ -32,19 +32,19 @@
  * job-list entry length exceeds that the EasyDMA silently drops the write. */
 uint16_t g_nrf_aar_out_status;
 
-/* CCM scatter/gather job lists and state */
-struct sg_job_entry g_ccm_in_jl[5];
-struct sg_job_entry g_ccm_out_jl[5];
-uint16_t g_ccm_alen;
-uint16_t g_ccm_mlen;
-uint16_t g_ccm_out_alen;
-uint8_t g_ccm_out_adata; /* sink for CCM ADATA output (may be masked) */
-uint8_t g_ccm_adata_in;  /* pre-masked ADATA input byte */
-uint16_t g_ccm_out_mlen; /* sink for CCM MLEN output — must not overwrite BLE LENGTH */
-uint8_t *g_ccm_in_ptr;
-uint8_t *g_ccm_out_ptr;
-uint8_t g_ccm_decrypt;
-struct nrf_ccm_data *g_ccm_data_ptr; /* saved for deferred register setup */
+/* CCM scatter/gather job lists and state — private to this file */
+static struct sg_job_entry g_ccm_in_jl[5];
+static struct sg_job_entry g_ccm_out_jl[5];
+static uint16_t g_ccm_alen;
+static uint16_t g_ccm_mlen;
+static uint16_t g_ccm_out_alen;
+static uint8_t g_ccm_out_adata;
+static uint8_t g_ccm_adata_in;
+static uint16_t g_ccm_out_mlen;
+static uint8_t *g_ccm_in_ptr;
+static uint8_t *g_ccm_out_ptr;
+static uint8_t g_ccm_decrypt;
+static struct nrf_ccm_data *g_ccm_data_ptr;
 
 /* AAR scatter/gather job lists */
 struct sg_job_entry g_aar_in_jl[19];
@@ -118,6 +118,267 @@ phy_debug_init(void)
 #endif
 }
 #endif /* PHY_USE_DEBUG */
+
+/*
+ * nRF54L KEY.VALUE byte order is reversed vs nRF52/nRF53.
+ * KEY.VALUE[0] gets the last 4 bytes of the key (word-reversed +
+ * byte-swapped). See datasheet Section 8.4.2.
+ */
+static void
+phy_hw_ccm_set_key(const uint8_t *key)
+{
+    const uint32_t *kp = (const uint32_t *)key;
+
+    NRF_CCM->KEY.VALUE[0] = __builtin_bswap32(kp[3]);
+    NRF_CCM->KEY.VALUE[1] = __builtin_bswap32(kp[2]);
+    NRF_CCM->KEY.VALUE[2] = __builtin_bswap32(kp[1]);
+    NRF_CCM->KEY.VALUE[3] = __builtin_bswap32(kp[0]);
+}
+
+/*
+ * Build BLE CCM nonce and write to NONCE.VALUE[0..3].
+ *
+ * nRF54L stores the nonce in reversed byte order vs nRF52/53.
+ * Standard BLE nonce (13 bytes): counter(5) | dir<<7|counter_msb | IV(8)
+ * nRF54L register layout:        IV(8) | dir<<7|counter_msb(1) | counter(4,BE)
+ *
+ * The reversed nonce is stored directly as LE words (no bswap).
+ * See datasheet v0.8, Section 8.4.2, page 234 — NONCE.VALUE example.
+ *
+ * NOTE: KEY and NONCE use DIFFERENT register conventions despite both
+ * being described as "reversed byte order".  KEY uses bswap32 + reversed
+ * word order; NONCE uses manually reversed bytes stored as plain LE words.
+ * Verified against datasheet NONCE example (IV=DEAFBABEBADCAB24, dir=1, ctr=1).
+ */
+static void
+phy_hw_ccm_set_nonce(struct nrf_ccm_data *ccm_data)
+{
+    uint8_t nonce[16];
+    const uint32_t *np;
+
+    /*
+     * IV bytes must be reversed — the nRF54L nonce register stores the
+     * entire 13-byte BLE nonce in reversed byte order, packed as LE words.
+     * The counter and dir fields are already in the correct (reversed =
+     * big-endian) order below; the IV must also be byte-reversed.
+     */
+    nonce[0] = ccm_data->iv[7];
+    nonce[1] = ccm_data->iv[6];
+    nonce[2] = ccm_data->iv[5];
+    nonce[3] = ccm_data->iv[4];
+    nonce[4] = ccm_data->iv[3];
+    nonce[5] = ccm_data->iv[2];
+    nonce[6] = ccm_data->iv[1];
+    nonce[7] = ccm_data->iv[0];
+    /*
+     * The controller already passes the BLE packet direction bit in the
+     * convention used by the other NimBLE PHY drivers:
+     *   - TX uses CONN_IS_CENTRAL(connsm)
+     *   - RX uses !CONN_IS_CENTRAL(connsm)
+     *
+     * The nRF54L datasheet documents a plain nonce direction bit and the
+     * working upstream drivers use the controller-provided value directly, so
+     * do not apply any nRF54L-specific inversion here.
+     */
+    nonce[8] = (ccm_data->dir_bit & 1) << 7 | ((ccm_data->pkt_counter >> 32) & 0x7F);
+    nonce[9] = (ccm_data->pkt_counter >> 24) & 0xFF;
+    nonce[10] = (ccm_data->pkt_counter >> 16) & 0xFF;
+    nonce[11] = (ccm_data->pkt_counter >> 8) & 0xFF;
+    nonce[12] = ccm_data->pkt_counter & 0xFF;
+    nonce[13] = 0;
+    nonce[14] = 0;
+    nonce[15] = 0;
+
+    np = (const uint32_t *)nonce;
+
+    NRF_CCM->NONCE.VALUE[0] = np[0];
+    NRF_CCM->NONCE.VALUE[1] = np[1];
+    NRF_CCM->NONCE.VALUE[2] = np[2];
+    NRF_CCM->NONCE.VALUE[3] = np[3];
+}
+
+/*
+ * Build CCM scatter/gather job lists for BLE packet format.
+ * BLE RADIO packet in RAM: [S0=hdr][LEN][S1=0][payload...][MIC if encrypted]
+ * CCM Adata = S0 (1 byte), Mdata starts at offset 3 (after S0/LEN/S1).
+ */
+static void
+phy_hw_ccm_build_ble_job_lists(uint8_t *in_buf, uint8_t *out_buf,
+                               uint16_t payload_len, uint8_t decrypt)
+{
+    uint16_t mdata_in_len;
+    uint16_t mdata_out_len;
+
+    if (decrypt) {
+        mdata_in_len = payload_len + 4; /* ciphertext + MIC */
+        mdata_out_len = payload_len;    /* plaintext only */
+    } else {
+        mdata_in_len = payload_len;      /* plaintext only */
+        mdata_out_len = payload_len + 4; /* ciphertext + MIC */
+    }
+
+    g_ccm_alen = 1;
+    /*
+     * Per datasheet Fig. 45/46: input MLEN = l(m) for encrypt, l(c) for
+     * decrypt.  MLEN tells the CCM how many bytes are in the MDATA field.
+     */
+    g_ccm_mlen = mdata_in_len;
+
+    /*
+     * BLE Data Channel PDU header mask (0xE3) zeroes NESN, SN, MD bits
+     * for CCM authentication.  These bits change hop-to-hop and must not
+     * be included in the MIC calculation.  The CCM ADATAMASK register
+     * should do this automatically (reset value 0xE3), but we pre-mask
+     * here to be safe — double-masking is idempotent.
+     */
+    g_ccm_adata_in = in_buf[0] & 0xE3;
+
+    /* Input job list */
+    g_ccm_in_jl[0].ptr = (uint8_t *)&g_ccm_alen;
+    g_ccm_in_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
+    g_ccm_in_jl[1].ptr = (uint8_t *)&g_ccm_mlen;
+    g_ccm_in_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
+    g_ccm_in_jl[2].ptr = &g_ccm_adata_in; /* pre-masked S0 byte */
+    g_ccm_in_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
+    g_ccm_in_jl[3].ptr = in_buf + 3; /* payload after S0/LEN/S1 */
+    g_ccm_in_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_in_len;
+    g_ccm_in_jl[4].ptr = NULL;
+    g_ccm_in_jl[4].attr_and_length = 0;
+
+    /* Output job list — must include ALEN + MLEN per datasheet Fig. 45/46 */
+    g_ccm_out_jl[0].ptr = (uint8_t *)&g_ccm_out_alen;
+    g_ccm_out_jl[0].attr_and_length = (CCM_ATTR_ALEN << 24) | 2;
+    /*
+     * MLEN output must NOT point at out_buf[1] (BLE LENGTH byte).
+     * The CCM hardware writes the plaintext message length here, which
+     * overwrites the BLE LENGTH field.  Redirect to a dummy so the
+     * caller-set LENGTH is preserved.
+     */
+    g_ccm_out_jl[1].ptr = (uint8_t *)&g_ccm_out_mlen;
+    g_ccm_out_jl[1].attr_and_length = (CCM_ATTR_MLEN << 24) | 2;
+    /*
+     * CCM ADATA output may be masked by ADATAMASK (0xE3), which zeroes
+     * NESN/SN/MD bits.  Write it to a dummy so the pre-copied original
+     * header in out_buf[0] is preserved (see phy_hw_ccm_post_rx_decrypt).
+     */
+    g_ccm_out_jl[2].ptr = &g_ccm_out_adata;
+    g_ccm_out_jl[2].attr_and_length = (CCM_ATTR_ADATA << 24) | 1;
+    g_ccm_out_jl[3].ptr = out_buf + 3; /* payload after header slot */
+    g_ccm_out_jl[3].attr_and_length = (CCM_ATTR_MDATA << 24) | mdata_out_len;
+    g_ccm_out_jl[4].ptr = NULL;
+    g_ccm_out_jl[4].attr_and_length = 0;
+
+    NRF_CCM->IN.PTR = (uint32_t)g_ccm_in_jl;
+    NRF_CCM->OUT.PTR = (uint32_t)g_ccm_out_jl;
+}
+
+void
+phy_hw_ccm_setup_tx(uint8_t *in_ptr, uint8_t *out_ptr, uint8_t *scratch_ptr,
+                    struct nrf_ccm_data *ccm_data)
+{
+    g_ccm_in_ptr = in_ptr;
+    g_ccm_out_ptr = out_ptr;
+    g_ccm_decrypt = 0;
+
+    /*
+     * Re-arm CCM explicitly for each TX packet. On nRF54L the RX path
+     * toggles ENABLE around deferred decrypt setup, so relying on stale
+     * peripheral state here can leave the next encrypted TX packet using an
+     * undefined configuration window.
+     */
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    NRF_CCM->EVENTS_ERROR = 0;
+    NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->MODE = (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    ble_phy_get_ccm_datarate();
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+    phy_hw_ccm_set_key(ccm_data->key);
+    phy_hw_ccm_set_nonce(ccm_data);
+}
+
+void
+phy_hw_ccm_setup_rx(uint8_t *in_ptr, uint8_t *out_ptr, uint8_t *scratch_ptr,
+                    struct nrf_ccm_data *ccm_data)
+{
+    g_ccm_in_ptr = in_ptr;
+    g_ccm_out_ptr = out_ptr;
+    g_ccm_decrypt = 1;
+    g_ccm_data_ptr = ccm_data;
+
+    /*
+     * Defer all CCM register writes (MODE, KEY, NONCE) to
+     * post_rx_decrypt so they happen right before START.
+     * The self-test (which passes) writes everything just before
+     * START; the previous approach wrote KEY/NONCE here with a
+     * hundreds-of-µs gap before START, and MIC always failed.
+     */
+}
+
+void
+phy_hw_ccm_start(void)
+{
+    if (g_ccm_decrypt) {
+        /* RX: don't start yet — triggered post-receive in ISR */
+        return;
+    }
+
+    /* TX: build job lists now (payload is filled) and start encryption.
+     * Set output header — CCM MLEN/ADATA outputs go to dummies, so the
+     * RADIO-visible S0/LENGTH/S1 must be set explicitly here. */
+    phy_hw_ccm_build_ble_job_lists(g_ccm_in_ptr, g_ccm_out_ptr, g_ccm_in_ptr[1], 0);
+    g_ccm_out_ptr[0] = g_ccm_in_ptr[0];     /* S0 (header byte) */
+    g_ccm_out_ptr[1] = g_ccm_in_ptr[1] + 4; /* LENGTH = plaintext + MIC */
+    g_ccm_out_ptr[2] = 0;                   /* S1 */
+    __DSB();
+    nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+}
+
+/*
+ * Post-receive CCM FastDecryption for nRF54L.
+ * Called from rx_end_isr after full packet received.
+ *
+ * ALL CCM register setup (MODE, ENABLE, KEY, NONCE, job lists) is done
+ * here, right before START.  Previous approach wrote MODE/KEY/NONCE in
+ * setup_rx (hundreds of µs earlier) and MIC always failed, while the
+ * boot self-test (which writes everything just before START) passes.
+ * Deferring all writes eliminates any register-volatility or ENABLE-
+ * clearing issues.
+ *
+ * BLE LENGTH field (enc_buf[1]) includes the 4-byte MIC for encrypted
+ * packets, so plaintext_len = LENGTH - 4.
+ */
+void
+phy_hw_ccm_post_rx_decrypt(uint8_t *enc_buf, uint8_t *out_buf)
+{
+    uint16_t ble_len = enc_buf[1];
+    uint16_t plaintext_len = (ble_len >= 4) ? (ble_len - 4) : 0;
+
+    /* Copy S0/S1 from encrypted buffer; set LENGTH to plaintext size. */
+    out_buf[0] = enc_buf[0];
+    out_buf[1] = plaintext_len;
+    out_buf[2] = enc_buf[2];
+
+    /*
+     * Full CCM setup — matches self-test sequence:
+     *   ENABLE=0 → MODE → ENABLE=2 → events → KEY → NONCE →
+     *   job lists → IN.PTR/OUT.PTR → DSB → START
+     */
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Disabled;
+    NRF_CCM->MODE = CCM_MODE_MODE_FastDecryption |
+                    (CCM_MODE_MACLEN_M4 << CCM_MODE_MACLEN_Pos) |
+                    ble_phy_get_ccm_datarate();
+    NRF_CCM->ENABLE = CCM_ENABLE_ENABLE_Enabled;
+    NRF_CCM->EVENTS_END = 0;
+    NRF_CCM->EVENTS_ERROR = 0;
+
+    phy_hw_ccm_set_key(g_ccm_data_ptr->key);
+    phy_hw_ccm_set_nonce(g_ccm_data_ptr);
+
+    phy_hw_ccm_build_ble_job_lists(enc_buf, out_buf, plaintext_len, 1);
+
+    __DSB();
+    nrf_ccm_task_trigger(NRF_CCM, NRF_CCM_TASK_START);
+}
 
 #if BABBLESIM
 extern void tm_tick(void);
