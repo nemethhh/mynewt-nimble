@@ -188,12 +188,32 @@ phy_txpower_set(int8_t dbm)
 int8_t
 phy_txpower_round(int8_t dbm)
 {
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos8dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Pos8dBm;
+    }
+
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos7dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Pos7dBm;
+    }
+
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos6dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Pos6dBm;
+    }
+
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos5dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Pos5dBm;
+    }
+
     if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos4dBm) {
         return (int8_t)RADIO_TXPOWER_TXPOWER_Pos4dBm;
     }
 
     if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos3dBm) {
         return (int8_t)RADIO_TXPOWER_TXPOWER_Pos3dBm;
+    }
+
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Pos2dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Pos2dBm;
     }
 
     if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_0dBm) {
@@ -210,6 +230,10 @@ phy_txpower_round(int8_t dbm)
 
     if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Neg12dBm) {
         return (int8_t)RADIO_TXPOWER_TXPOWER_Neg12dBm;
+    }
+
+    if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Neg16dBm) {
+        return (int8_t)RADIO_TXPOWER_TXPOWER_Neg16dBm;
     }
 
     if (dbm >= (int8_t)RADIO_TXPOWER_TXPOWER_Neg20dBm) {
